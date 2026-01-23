@@ -1,0 +1,1 @@
+Do I want to collect full training metrics from all the clients as well as the server?
