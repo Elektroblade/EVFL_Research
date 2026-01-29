@@ -1,13 +1,30 @@
 import numpy as np
+import pandas as pd
+from flwr_datasets import FederatedDataset
+from flwr_datasets.partitioner import IidPartitioner
+from datasets import Dataset
+from datasets import DatasetDict
+import time
+import numpy as np
 
 class DNN:
-    def __init__(self, input_size, output_size, hidden_layers, neurons_per_layer, learning_rate, activation):
+    def __init__(self, input_size, output_size, hidden_layers, neurons_per_layer, learning_rate, activation, task_type="multiclass"):
+        assert task_type in ["binary", "multiclass", "regression"], \
+            f"Unsupported task_type: {task_type}"
+
+        self.task_type = task_type
         self.input_size = input_size
         self.output_size = output_size
         self.hidden_layers = hidden_layers
         self.neurons_per_layer = neurons_per_layer
         self.learning_rate = learning_rate
         self.activation = activation
+        if self.task_type == "binary":
+            self.output_activation = sigmoid
+        elif self.task_type == "multiclass":
+            self.output_activation = softmax
+        else:
+            self.output_activation = self.activation
         
         self.weights = []
         self.biases = []
@@ -24,13 +41,21 @@ class DNN:
     
     def feedforward(self, x):
         activations = [x]
-        
-        for i in range(self.hidden_layers + 1):
-            weighted_sum = np.dot(self.weights[i], activations[i]) + self.biases[i]
-            activation_output = self.activation(weighted_sum)
-            activations.append(activation_output)
-        
-        return activations[-1]
+        weighted_sums = []
+
+        for i in range(len(self.weights)):
+            z = np.dot(self.weights[i], activations[-1]) + self.biases[i]
+            weighted_sums.append(z)
+
+            if i == len(self.weights) - 1:
+                a = self.output_activation(z)   # <-- output layer
+            else:
+                a = self.activation(z)
+
+            activations.append(a)
+
+        return activations, weighted_sums
+
     
     def backpropagation(self, x, y):
         gradients_w = [np.zeros(weight.shape) for weight in self.weights]
@@ -47,7 +72,10 @@ class DNN:
             activations.append(activation_output)
         
         # Backpropagation
-        delta = (activations[-1] - y) * self.activation_derivative(weighted_sums[-1])
+        if self.task_type in ["binary", "multiclass"]:
+            delta = activations[-1] - y
+        else:
+            delta = (activations[-1] - y) * self.activation_derivative(weighted_sums[-1])
         gradients_w[-1] = np.dot(delta, activations[-2].T)
         gradients_b[-1] = delta
         
@@ -58,14 +86,52 @@ class DNN:
         
         return gradients_w, gradients_b
     
-    def load_data(partition_id: int, num_partitions: int, batch_size: int):
+    def sigmoid(z):
+        return 1 / (1 + np.exp(-z))
+
+    def softmax(z):
+        z = z - np.max(z, axis=0, keepdims=True)
+        exp_z = np.exp(z)
+        return exp_z / np.sum(exp_z, axis=0, keepdims=True)
+
+
+    
+    def load_data(partition_id: int, num_partitions: int, batch_size: int, target_column: str = "Label",):
         """Load partition CIFAR10 data."""
         # Only initialize `FederatedDataset` once
         global fds
         if fds is None:
             partitioner = IidPartitioner(num_partitions=num_partitions)
+
+            metasploitable_df = pd.read_csv('InSDN_DatasetCSV/metasploitable-2.csv')
+            normal_data_df = pd.read_csv('InSDN_DatasetCSV/Normal_data.csv')
+            ovs_df = pd.read_csv('InSDN_DatasetCSV/OVS.csv')
+            normal_data_df['Target Type'] = 'none'
+            metasploitable_df['Target Type'] = 'Host'
+            ovs_df['Target Type'] = 'SDN'
+            insdn_data_df = pd.concat([metasploitable_df, normal_data_df, ovs_df], ignore_index=True)
+
+            assert target_column in insdn_data_df.columns, \
+                f"{target_column} not found in dataset"
+
+            insdn_data_df["target"] = insdn_data_df[target_column]
+
+            hf_dataset = hf_dataset.remove_columns(
+                [c for c in ["Label", "Target Type"]]
+            )
+
+            columns_without_labels = insdn_data_df.drop(columns=['Label', 'Target Type']).columns
+            print("Columns in the dataset (excluding 'Label' and 'Target Type'):")
+            print(list(columns_without_labels))
+
+            hf_dataset = Dataset.from_pandas(insdn_data_df)
+            hf_dataset = hf_dataset.class_encode_column("Label")
+            dataset_dict = DatasetDict({
+                "train": hf_dataset
+            })
+
             fds = FederatedDataset(
-                dataset="uoft-cs/cifar10",
+                dataset=dataset_dict,
                 partitioners={"train": partitioner},
             )
         partition = fds.load_partition(partition_id)
@@ -86,55 +152,182 @@ class DNN:
         dataset = test_dataset.with_format("torch").with_transform(apply_transforms)
         return DataLoader(dataset, batch_size=128)
     
-    def train(self, x_train, y_train, max_iterations=100, convergence_threshold=1e-6):
-        iterations = 0
-        prev_loss = float('inf')
-        
-        while iterations < max_iterations:
-            total_loss = 0
-            
-            for i in range(len(x_train)):
-                x = x_train[i]
-                y = y_train[i]
-                
-                # Feedforward and backpropagation
+    def apply_transforms(batch):
+        """
+        Transform HF batch into NumPy arrays compatible with the custom DNN.
+        """
+
+        # 1️⃣ Extract target
+        y = np.array(batch["target"])  # shape: (batch_size,)
+
+        # 2️⃣ Extract features (everything except target)
+        feature_cols = [k for k in batch.keys() if k != "target"]
+        X = np.stack([batch[col] for col in feature_cols], axis=1)
+        # X shape: (batch_size, input_size)
+
+        # 3️⃣ Transpose for DNN
+        X = X.T  # (input_size, batch_size)
+
+        # 4️⃣ Encode targets
+        if task_type == "binary":
+            y = y.reshape(1, -1)  # (1, batch_size)
+
+        elif task_type == "multiclass":
+            y_onehot = np.zeros((output_size, y.shape[0]))
+            y_onehot[y, np.arange(y.shape[0])] = 1
+            y = y_onehot  # (output_size, batch_size)
+
+        else:  # regression
+            y = y.reshape(output_size, -1)
+
+        return {
+            "x": X,
+            "y": y,
+        }
+    
+    def train(
+        self,
+        trainloader,
+        max_epochs=50,
+        convergence_threshold=1e-6,
+    ):
+        prev_loss = float("inf")
+
+        for epoch in range(max_epochs):
+            total_loss = 0.0
+            num_batches = 0
+
+            for batch in trainloader:
+                x = batch["x"]  # (input_size, batch_size)
+                y = batch["y"]  # (output_size, batch_size)
+
+                # ---- Forward + backward ----
                 gradients_w, gradients_b = self.backpropagation(x, y)
-                
-                # Update weights and biases using gradient descent
-                self.weights = [weight - self.learning_rate * grad_w for weight, grad_w in zip(self.weights, gradients_w)]
-                self.biases = [bias - self.learning_rate * grad_b for bias, grad_b in zip(self.biases, gradients_b)]
-                
-                # Compute loss
-                prediction = self.feedforward(x)
-                loss = 0.5 * np.sum((prediction - y) ** 2)
+
+                # ---- Gradient descent update ----
+                self.weights = [
+                    w - self.learning_rate * gw
+                    for w, gw in zip(self.weights, gradients_w)
+                ]
+                self.biases = [
+                    b - self.learning_rate * gb
+                    for b, gb in zip(self.biases, gradients_b)
+                ]
+
+                # ---- Loss computation ----
+                activations, _ = self.feedforward(x)
+                y_hat = activations[-1]
+
+                if self.task_type == "binary":
+                    # Binary cross-entropy
+                    eps = 1e-9
+                    loss = -np.mean(
+                        y * np.log(y_hat + eps) +
+                        (1 - y) * np.log(1 - y_hat + eps)
+                    )
+
+                elif self.task_type == "multiclass":
+                    # Categorical cross-entropy
+                    eps = 1e-9
+                    loss = -np.mean(
+                        np.sum(y * np.log(y_hat + eps), axis=0)
+                    )
+
+                else:
+                    # Regression fallback (MSE)
+                    loss = 0.5 * np.mean((y_hat - y) ** 2)
+
                 total_loss += loss
-            
-            # Check for convergence
-            if abs(prev_loss - total_loss) < convergence_threshold:
+                num_batches += 1
+
+            avg_loss = total_loss / num_batches
+
+            # ---- Convergence check ----
+            if abs(prev_loss - avg_loss) < convergence_threshold:
+                print(f"Converged at epoch {epoch}")
                 break
-            
-            # ```python
-            iterations += 1
-            prev_loss = total_loss
-        
-        print(f"Training completed in {iterations} iterations")
+
+            prev_loss = avg_loss
+            print(f"Epoch {epoch}: loss = {avg_loss:.6f}")
+
         return prev_loss
 
-    def test(net, testloader, device):
-        """Validate the model on the test set."""
-        net.to(device)
-        criterion = torch.nn.CrossEntropyLoss()
-        correct, loss = 0, 0.0
-        with torch.no_grad():
-            for batch in testloader:
-                images = batch["img"].to(device)
-                labels = batch["label"].to(device)
-                outputs = net(images)
-                loss += criterion(outputs, labels).item()
-                correct += (torch.max(outputs.data, 1)[1] == labels).sum().item()
-        accuracy = correct / len(testloader.dataset)
-        loss = loss / len(testloader)
-        return loss, accuracy
-    
-    def predict(self, x):
-        return self.feedforward(x)
+    def predict(self, testloader):
+        """
+        Run inference on the entire testloader.
+
+        Returns:
+            predictions: np.ndarray (num_samples,)
+            prediction_probs: np.ndarray (num_samples, num_classes)
+            real_values: np.ndarray (num_samples,)
+            avg_inference_time_ms: float
+        """
+
+        all_predictions = []
+        all_prediction_probs = []
+        all_real_values = []
+
+        total_time = 0.0
+        total_samples = 0
+
+        for batch in testloader:
+            x = batch["x"]  # (input_size, batch_size)
+            y = batch["y"]  # (output_size, batch_size)
+
+            batch_size = x.shape[1]
+
+            # ---- Inference timing ----
+            start = time.perf_counter()
+            activations, _ = self.feedforward(x)
+            end = time.perf_counter()
+
+            total_time += (end - start)
+            total_samples += batch_size
+
+            y_hat = activations[-1]  # (output_size, batch_size)
+
+            # ---- Predictions & probabilities ----
+            if self.task_type == "binary":
+                probs = y_hat.flatten()                 # (batch_size,)
+                preds = (probs >= 0.5).astype(int)     # threshold
+                real = y.flatten()
+
+                all_prediction_probs.extend(
+                    np.vstack([1 - probs, probs]).T    # (batch_size, 2)
+                )
+
+            elif self.task_type == "multiclass":
+                probs = y_hat.T                         # (batch_size, num_classes)
+                preds = np.argmax(probs, axis=1)
+
+                real = np.argmax(y, axis=0)
+
+                all_prediction_probs.extend(probs)
+
+            else:  # regression fallback
+                preds = y_hat.T
+                probs = y_hat.T
+                real = y.T
+
+                all_prediction_probs.extend(probs)
+
+            all_predictions.extend(preds)
+            all_real_values.extend(real)
+
+        avg_inference_time_ms = (total_time / total_samples) * 1000.0
+
+        return (
+            np.array(all_predictions),
+            np.array(all_prediction_probs),
+            np.array(all_real_values),
+            avg_inference_time_ms,
+        )
+
+def dnn_to_arrays(model: DNN):
+    return model.weights + model.biases
+
+
+def arrays_to_dnn(model: DNN, arrays):
+    n_w = len(model.weights)
+    model.weights = arrays[:n_w]
+    model.biases = arrays[n_w:]

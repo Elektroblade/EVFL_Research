@@ -9,6 +9,7 @@ from pytorchexample.task import Net, load_centralized_dataset, test
 
 # Create ServerApp
 app = ServerApp()
+TASK_TYPE = "multiclass"
 
 
 @app.main()
@@ -21,8 +22,16 @@ def main(grid: Grid, context: Context) -> None:
     lr: float = context.run_config["learning-rate"]
 
     # Load global model
-    global_model = Net()
-    arrays = ArrayRecord(global_model.state_dict())
+    global_model = DNN(
+        input_size=INPUT_SIZE,
+        output_size=OUTPUT_SIZE,
+        hidden_layers=HIDDEN_LAYERS,
+        neurons_per_layer=NEURONS_PER_LAYER,
+        learning_rate=lr,
+        activation=relu,
+        task_type=TASK_TYPE,
+    )
+    arrays = ArrayRecord(dnn_to_arrays(global_model))
 
     # Initialize FedAvg strategy
     strategy = FedAvg(fraction_evaluate=fraction_evaluate)
@@ -36,26 +45,51 @@ def main(grid: Grid, context: Context) -> None:
         evaluate_fn=global_evaluate,
     )
 
-    # Save final model to disk
-    print("\nSaving final model to disk...")
-    state_dict = result.arrays.to_torch_state_dict()
-    torch.save(state_dict, "final_model.pt")
+    # ---- Save final model ----
+    print("\nSaving final NumPy DNN model...")
+    final_arrays = result.arrays.to_numpy()
+    arrays_to_dnn(global_model, final_arrays)
+
+    with open("final_model.npy", "wb") as f:
+        np.save(f, final_arrays)
 
 
 def global_evaluate(server_round: int, arrays: ArrayRecord) -> MetricRecord:
     """Evaluate model on central data."""
 
     # Load the model and initialize it with the received weights
-    model = Net()
-    model.load_state_dict(arrays.to_torch_state_dict())
-    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-    model.to(device)
+    model = DNN(
+        input_size=INPUT_SIZE,
+        output_size=OUTPUT_SIZE,
+        hidden_layers=HIDDEN_LAYERS,
+        neurons_per_layer=NEURONS_PER_LAYER,
+        learning_rate=0.0,  # no training here
+        activation=relu,
+        task_type=TASK_TYPE,
+    )
+    arrays_to_dnn(model, arrays.to_numpy())
+    # attempt to move model to gpu here
 
     # Load entire test set
     test_dataloader = load_centralized_dataset()
 
     # Evaluate the global model on the test set
-    test_loss, test_acc = test(model, test_dataloader, device)
+    preds, probs, y_true, avg_inf_ms = model.predict(testloader)
+    accuracy = np.mean(preds == y_true)
+
+    return MetricRecord({
+        "accuracy": float(accuracy),
+        "avg_inference_time_ms": avg_inf_ms,
+    })
 
     # Return the evaluation metrics
     return MetricRecord({"accuracy": test_acc, "loss": test_loss})
+
+def dnn_to_arrays(model: DNN):
+    return model.weights + model.biases
+
+
+def arrays_to_dnn(model: DNN, arrays):
+    n_w = len(model.weights)
+    model.weights = arrays[:n_w]
+    model.biases = arrays[n_w:]
