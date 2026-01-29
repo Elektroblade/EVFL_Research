@@ -15,14 +15,14 @@ dependencies = [
 ]
 
 [tool.hatch.build.targets.wheel]
-packages = ["pytorchexample"]
+packages = ["evfl"]
 
 [tool.flwr.app]
 publisher = "flwrlabs"
 
 [tool.flwr.app.components]
-serverapp = "pytorchexample.server_app:app"
-clientapp = "pytorchexample.client_app:app"
+serverapp = "evfl.server_app:app"
+clientapp = "evfl.client_app:app"
 
 [tool.flwr.app.config]
 num-server-rounds = 3
