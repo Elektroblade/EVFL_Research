@@ -7,6 +7,17 @@ from flwr.clientapp import ClientApp
 from pytorchexample.task import Net, load_data
 from pytorchexample.task import test as test_fn
 from pytorchexample.task import train as train_fn
+from dnn import (
+    DNN,
+    INPUT_SIZE,
+    OUTPUT_SIZE,
+    HIDDEN_LAYERS,
+    NEURONS_PER_LAYER,
+    TASK_TYPE,
+    dnn_to_arrays,
+    arrays_to_dnn,
+    relu
+)
 
 # Flower ClientApp
 app = ClientApp()
@@ -17,10 +28,17 @@ def train(msg: Message, context: Context):
     """Train the model on local data."""
 
     # Load the model and initialize it with the received weights
-    model = Net()
-    model.load_state_dict(msg.content["arrays"].to_torch_state_dict())
-    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-    model.to(device)
+    model = DNN(
+        input_size=INPUT_SIZE,
+        output_size=OUTPUT_SIZE,
+        hidden_layers=HIDDEN_LAYERS,
+        neurons_per_layer=NEURONS_PER_LAYER,
+        learning_rate=msg.content["config"]["lr"],
+        activation=relu,
+        task_type=TASK_TYPE,
+    )
+    arrays_to_dnn(model, msg.content["arrays"].to_numpy())
+    # here i would put the model on gpu but can't
 
     # Load the data
     partition_id = context.node_config["partition-id"]
@@ -29,16 +47,13 @@ def train(msg: Message, context: Context):
     trainloader, _ = load_data(partition_id, num_partitions, batch_size)
 
     # Call the training function
-    train_loss = train_fn(
-        model,
+    train_loss = model.train(
         trainloader,
-        context.run_config["local-epochs"],
-        msg.content["config"]["lr"],
-        device,
+        max_epochs=context.run_config["local-epochs"],
     )
 
     # Construct and return reply Message
-    model_record = ArrayRecord(model.state_dict())
+    model_record = ArrayRecord(dnn_to_arrays(model))
     metrics = {
         "train_loss": train_loss,
         "num-examples": len(trainloader.dataset),
@@ -53,10 +68,16 @@ def evaluate(msg: Message, context: Context):
     """Evaluate the model on local data."""
 
     # Load the model and initialize it with the received weights
-    model = Net()
-    model.load_state_dict(msg.content["arrays"].to_torch_state_dict())
-    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-    model.to(device)
+    model = DNN(
+        input_size=INPUT_SIZE,
+        output_size=OUTPUT_SIZE,
+        hidden_layers=HIDDEN_LAYERS,
+        neurons_per_layer=NEURONS_PER_LAYER,
+        learning_rate=0.0,  # no training
+        activation=relu,
+        task_type=TASK_TYPE,
+    )
+    arrays_to_dnn(model, msg.content["arrays"].to_numpy())
 
     # Load the data
     partition_id = context.node_config["partition-id"]
@@ -65,16 +86,14 @@ def evaluate(msg: Message, context: Context):
     _, valloader = load_data(partition_id, num_partitions, batch_size)
 
     # Call the evaluation function
-    eval_loss, eval_acc = test_fn(
-        model,
-        valloader,
-        device,
-    )
+    preds, probs, y_true, avg_inf_ms = model.predict(valloader)
+
+    accuracy = float((preds == y_true).mean())
 
     # Construct and return reply Message
     metrics = {
-        "eval_loss": eval_loss,
-        "eval_acc": eval_acc,
+        "eval_acc": accuracy,
+        "avg_inference_time_ms": avg_inf_ms,
         "num-examples": len(valloader.dataset),
     }
     metric_record = MetricRecord(metrics)

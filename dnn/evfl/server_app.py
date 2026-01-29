@@ -4,13 +4,23 @@ import torch
 from flwr.app import ArrayRecord, ConfigRecord, Context, MetricRecord
 from flwr.serverapp import Grid, ServerApp
 from flwr.serverapp.strategy import FedAvg
+import numpy as np
 
 from pytorchexample.task import Net, load_centralized_dataset, test
+from dnn import (
+    DNN,
+    INPUT_SIZE,
+    OUTPUT_SIZE,
+    HIDDEN_LAYERS,
+    NEURONS_PER_LAYER,
+    TASK_TYPE,
+    dnn_to_arrays,
+    arrays_to_dnn,
+    relu
+)
 
 # Create ServerApp
 app = ServerApp()
-TASK_TYPE = "multiclass"
-
 
 @app.main()
 def main(grid: Grid, context: Context) -> None:
@@ -74,22 +84,10 @@ def global_evaluate(server_round: int, arrays: ArrayRecord) -> MetricRecord:
     test_dataloader = load_centralized_dataset()
 
     # Evaluate the global model on the test set
-    preds, probs, y_true, avg_inf_ms = model.predict(testloader)
+    preds, probs, y_true, avg_inf_ms = model.predict(test_dataloader)
     accuracy = np.mean(preds == y_true)
 
     return MetricRecord({
         "accuracy": float(accuracy),
         "avg_inference_time_ms": avg_inf_ms,
     })
-
-    # Return the evaluation metrics
-    return MetricRecord({"accuracy": test_acc, "loss": test_loss})
-
-def dnn_to_arrays(model: DNN):
-    return model.weights + model.biases
-
-
-def arrays_to_dnn(model: DNN, arrays):
-    n_w = len(model.weights)
-    model.weights = arrays[:n_w]
-    model.biases = arrays[n_w:]

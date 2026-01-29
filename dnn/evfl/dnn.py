@@ -7,6 +7,12 @@ from datasets import DatasetDict
 import time
 import numpy as np
 
+INPUT_SIZE = 78
+OUTPUT_SIZE = 3
+HIDDEN_LAYERS = 2
+NEURONS_PER_LAYER = 64
+TASK_TYPE = "multiclass"
+
 class DNN:
     def __init__(self, input_size, output_size, hidden_layers, neurons_per_layer, learning_rate, activation, task_type="multiclass"):
         assert task_type in ["binary", "multiclass", "regression"], \
@@ -331,3 +337,9 @@ def arrays_to_dnn(model: DNN, arrays):
     n_w = len(model.weights)
     model.weights = arrays[:n_w]
     model.biases = arrays[n_w:]
+
+def relu(z):
+    return np.maximum(0, z)
+
+def relu_derivative(z):
+    return (z > 0).astype(float)
