@@ -1,0 +1,1 @@
+Vanlalruata Hnamte, Ashfaq Ahmad Najar, Hong Nhung-Nguyen, Jamal Hussain, Manohar Naik S, "DDoS attack detection and mitigation using deep neural network in SDN environment," Computers & Security, 103661, ISSN 0167-4048, 2023.
