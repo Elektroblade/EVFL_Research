@@ -52,7 +52,7 @@ def global_evaluate(server_round: int, arrays: ArrayRecord) -> MetricRecord:
     model.to(device)
 
     # Load entire test set
-    test_dataloader = load_centralized_dataset()
+    test_dataloader = load_centralized_dataset(target_column = "Label")
 
     # Evaluate the global model on the test set
     test_loss, test_acc = test(model, test_dataloader, device)

@@ -6,12 +6,18 @@ from datasets import Dataset
 from datasets import DatasetDict
 import time
 import numpy as np
+import random
+import torch
+from pathlib import Path
+from torch.utils.data import DataLoader
 
 INPUT_SIZE = 78
 OUTPUT_SIZE = 3
 HIDDEN_LAYERS = 2
 NEURONS_PER_LAYER = 64
 TASK_TYPE = "multiclass"
+SEED = 42
+BATCH_SIZE = 32
 
 class DNN:
     def __init__(self, input_size, output_size, hidden_layers, neurons_per_layer, learning_rate, activation, task_type="multiclass"):
@@ -102,16 +108,34 @@ class DNN:
 
 
     
-    def load_data(partition_id: int, num_partitions: int, batch_size: int, target_column: str = "Label",):
+    def load_data(self, partition_id: int, num_partitions: int, batch_size: int, target_column: str = "Label",):
         """Load partition CIFAR10 data."""
         # Only initialize `FederatedDataset` once
         global fds
         if fds is None:
             partitioner = IidPartitioner(num_partitions=num_partitions)
 
-            metasploitable_df = pd.read_csv('InSDN_DatasetCSV/metasploitable-2.csv')
-            normal_data_df = pd.read_csv('InSDN_DatasetCSV/Normal_data.csv')
-            ovs_df = pd.read_csv('InSDN_DatasetCSV/OVS.csv')
+            THIS_DIR = Path(__file__).resolve().parent
+            PROJECT_ROOT = THIS_DIR.parents[1]   # evfl → dnn → EVFL_Research
+            DATA_DIR = PROJECT_ROOT / "InSDN_DatasetCSV" / "InSDN_DatasetCSV"
+
+            # Fail fast if path is wrong
+            if not DATA_DIR.exists():
+                raise FileNotFoundError(f"Dataset directory not found: {DATA_DIR}")
+
+            metasploitable_df = pd.read_csv(DATA_DIR / "metasploitable-2.csv")
+            normal_data_df = pd.read_csv(DATA_DIR / "Normal_data.csv")
+            ovs_df = pd.read_csv(DATA_DIR / "OVS.csv")
+
+            # Normalize
+            metasploitable_df = normalize_columns(metasploitable_df)
+            normal_data_df = normalize_columns(normal_data_df)
+            ovs_df = normalize_columns(ovs_df)
+
+            metasploitable_df = normalize_target_column(metasploitable_df, target_column)
+            normal_data_df = normalize_target_column(normal_data_df, target_column)
+            ovs_df = normalize_target_column(ovs_df, target_column)
+
             normal_data_df['Target Type'] = 'none'
             metasploitable_df['Target Type'] = 'Host'
             ovs_df['Target Type'] = 'SDN'
@@ -119,6 +143,8 @@ class DNN:
 
             assert target_column in insdn_data_df.columns, \
                 f"{target_column} not found in dataset"
+            
+            self.num_classes = insdn_data_df[target_column].nunique()
 
             insdn_data_df["target"] = insdn_data_df[target_column]
 
@@ -142,29 +168,83 @@ class DNN:
             )
         partition = fds.load_partition(partition_id)
         # Divide data on each node: 80% train, 20% test
-        partition_train_test = partition.train_test_split(test_size=0.2, seed=42)
-        # Construct dataloaders
-        partition_train_test = partition_train_test.with_transform(apply_transforms)
-        trainloader = DataLoader(
-            partition_train_test["train"], batch_size=batch_size, shuffle=True
+        partition_train_test = partition.train_test_split(
+            test_size=0.2,
+            seed=SEED,
         )
-        testloader = DataLoader(partition_train_test["test"], batch_size=batch_size)
+        # Construct dataloaders
+        partition_train_test = partition_train_test.with_transform(self.apply_transforms)
+        g = torch.Generator()
+        g.manual_seed(SEED)
+
+        trainloader = DataLoader(
+            partition_train_test["train"],
+            batch_size=None,
+            shuffle=True,
+            generator=g,
+        )
+        testloader = DataLoader(partition_train_test["test"], batch_size=None, shuffle=False)
         return trainloader, testloader
     
-    def load_centralized_dataset():
-        """Load test set and return dataloader."""
-        # Load entire test set
-        test_dataset = load_dataset("uoft-cs/cifar10", split="test")
-        dataset = test_dataset.with_format("torch").with_transform(apply_transforms)
-        return DataLoader(dataset, batch_size=128)
+    def load_centralized_dataset(self, target_column = "Label"):
+        # Load full dataset
+        THIS_DIR = Path(__file__).resolve().parent
+        PROJECT_ROOT = THIS_DIR.parents[1]   # evfl → dnn → EVFL_Research
+        DATA_DIR = PROJECT_ROOT / "InSDN_DatasetCSV" / "InSDN_DatasetCSV"
+
+        # Fail fast if path is wrong
+        if not DATA_DIR.exists():
+            raise FileNotFoundError(f"Dataset directory not found: {DATA_DIR}")
+
+        metasploitable_df = pd.read_csv(DATA_DIR / "metasploitable-2.csv")
+        normal_data_df = pd.read_csv(DATA_DIR / "Normal_data.csv")
+        ovs_df = pd.read_csv(DATA_DIR / "OVS.csv")
+        
+        # Normalize
+        metasploitable_df = normalize_columns(metasploitable_df)
+        normal_data_df = normalize_columns(normal_data_df)
+        ovs_df = normalize_columns(ovs_df)
+
+        metasploitable_df = normalize_target_column(metasploitable_df, target_column)
+        normal_data_df = normalize_target_column(normal_data_df, target_column)
+        ovs_df = normalize_target_column(ovs_df, target_column)
+
+        normal_data_df['Target Type'] = 'none'
+        metasploitable_df['Target Type'] = 'Host'
+        ovs_df['Target Type'] = 'SDN'
+
+        insdn_data_df = pd.concat(
+            [metasploitable_df, normal_data_df, ovs_df],
+            ignore_index=True
+        )
+
+        self.num_classes = insdn_data_df[target_column].nunique()
+
+        insdn_data_df["target"] = insdn_data_df[target_column]
+
+        hf_dataset = Dataset.from_pandas(insdn_data_df)
+        hf_dataset = hf_dataset.class_encode_column(target_column)
+
+        # Deterministic split
+        dataset = hf_dataset.train_test_split(test_size=0.2, seed=42)
+
+        test_dataset = dataset["test"].with_transform(self.apply_transforms)
+
+        return DataLoader(
+            test_dataset,
+            batch_size=None,
+            shuffle=False,
+        )
     
-    def apply_transforms(batch):
+    def apply_transforms(self, batch):
         """
         Transform HF batch into NumPy arrays compatible with the custom DNN.
         """
 
         # 1️⃣ Extract target
-        y = np.array(batch["target"])  # shape: (batch_size,)
+        y = np.asarray(batch["Label"], dtype=np.int64)  # shape: (batch_size,)
+
+        print(y.dtype, y[:5])
 
         # 2️⃣ Extract features (everything except target)
         feature_cols = [k for k in batch.keys() if k != "target"]
@@ -175,16 +255,19 @@ class DNN:
         X = X.T  # (input_size, batch_size)
 
         # 4️⃣ Encode targets
-        if task_type == "binary":
+        if self.task_type == "binary":
             y = y.reshape(1, -1)  # (1, batch_size)
 
-        elif task_type == "multiclass":
-            y_onehot = np.zeros((output_size, y.shape[0]))
-            y_onehot[y, np.arange(y.shape[0])] = 1
+        elif self.task_type == "multiclass":
+            y_onehot = np.zeros((self.output_size, y.shape[0]))
+            num_classes = self.num_classes  # or infer from model
+            y_onehot = np.zeros((y.shape[0], num_classes), dtype=np.float32)
+            y_onehot[np.arange(y.shape[0]), y] = 1
+
             y = y_onehot  # (output_size, batch_size)
 
         else:  # regression
-            y = y.reshape(output_size, -1)
+            y = y.reshape(self.output_size, -1)
 
         return {
             "x": X,
@@ -280,7 +363,7 @@ class DNN:
             x = batch["x"]  # (input_size, batch_size)
             y = batch["y"]  # (output_size, batch_size)
 
-            batch_size = x.shape[1]
+            batch_size = x.shape[0]
 
             # ---- Inference timing ----
             start = time.perf_counter()
@@ -334,12 +417,51 @@ def dnn_to_arrays(model: DNN):
 
 
 def arrays_to_dnn(model: DNN, arrays):
+    # Convert ArrayRecord -> list
+    arrays_list = list(arrays) if not isinstance(arrays, list) else arrays
     n_w = len(model.weights)
-    model.weights = arrays[:n_w]
-    model.biases = arrays[n_w:]
+    model.weights = arrays_list[:n_w]
+    model.biases = arrays_list[n_w:]
 
 def relu(z):
     return np.maximum(0, z)
 
 def relu_derivative(z):
     return (z > 0).astype(float)
+
+def sigmoid(z):
+    return 1 / (1 + np.exp(-z))
+
+def softmax(z):
+    exp_z = np.exp(z - np.max(z, axis=0, keepdims=True))
+    return exp_z / np.sum(exp_z, axis=0, keepdims=True)
+
+def seed_everything(seed: int):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+
+    # Ensure deterministic behavior in PyTorch
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+
+def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
+    df.columns = df.columns.str.strip()
+    return df
+
+def normalize_target_column(
+    df: pd.DataFrame,
+    target_column: str,
+) -> pd.DataFrame:
+    if target_column not in df.columns:
+        raise ValueError(f"{target_column} not found in columns")
+
+    # Convert to string → strip whitespace
+    df[target_column] = (
+        df[target_column]
+        .astype(str)
+        .str.strip()
+    )
+
+    return df

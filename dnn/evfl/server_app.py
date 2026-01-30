@@ -6,8 +6,7 @@ from flwr.serverapp import Grid, ServerApp
 from flwr.serverapp.strategy import FedAvg
 import numpy as np
 
-from pytorchexample.task import Net, load_centralized_dataset, test
-from dnn import (
+from evfl.dnn import (
     DNN,
     INPUT_SIZE,
     OUTPUT_SIZE,
@@ -57,7 +56,7 @@ def main(grid: Grid, context: Context) -> None:
 
     # ---- Save final model ----
     print("\nSaving final NumPy DNN model...")
-    final_arrays = result.arrays.to_numpy()
+    final_arrays = result.arrays
     arrays_to_dnn(global_model, final_arrays)
 
     with open("final_model.npy", "wb") as f:
@@ -77,11 +76,11 @@ def global_evaluate(server_round: int, arrays: ArrayRecord) -> MetricRecord:
         activation=relu,
         task_type=TASK_TYPE,
     )
-    arrays_to_dnn(model, arrays.to_numpy())
+    arrays_to_dnn(model, arrays)
     # attempt to move model to gpu here
 
     # Load entire test set
-    test_dataloader = load_centralized_dataset()
+    test_dataloader = model.load_centralized_dataset()
 
     # Evaluate the global model on the test set
     preds, probs, y_true, avg_inf_ms = model.predict(test_dataloader)
