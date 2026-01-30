@@ -18,12 +18,19 @@ NEURONS_PER_LAYER = 64
 TASK_TYPE = "multiclass"
 SEED = 42
 BATCH_SIZE = 32
+DROP_COLS = [
+    "Flow ID",
+    "Src IP",
+    "Dst IP",
+    "Timestamp"
+]
+DATASET_DIR = "datasets/insdn_hf_dataset"
 
 class DNN:
     def __init__(self, input_size, output_size, hidden_layers, neurons_per_layer, learning_rate, activation, task_type="multiclass"):
         assert task_type in ["binary", "multiclass", "regression"], \
             f"Unsupported task_type: {task_type}"
-
+        self.fds = None
         self.task_type = task_type
         self.input_size = input_size
         self.output_size = output_size
@@ -111,8 +118,7 @@ class DNN:
     def load_data(self, partition_id: int, num_partitions: int, batch_size: int, target_column: str = "Label",):
         """Load partition CIFAR10 data."""
         # Only initialize `FederatedDataset` once
-        global fds
-        if fds is None:
+        if self.fds is None:
             partitioner = IidPartitioner(num_partitions=num_partitions)
 
             THIS_DIR = Path(__file__).resolve().parent
@@ -148,25 +154,31 @@ class DNN:
 
             insdn_data_df["target"] = insdn_data_df[target_column]
 
-            hf_dataset = hf_dataset.remove_columns(
-                [c for c in ["Label", "Target Type"]]
-            )
+            insdn_data_df = insdn_data_df.drop(columns=DROP_COLS, errors="ignore")
 
             columns_without_labels = insdn_data_df.drop(columns=['Label', 'Target Type']).columns
             print("Columns in the dataset (excluding 'Label' and 'Target Type'):")
             print(list(columns_without_labels))
 
             hf_dataset = Dataset.from_pandas(insdn_data_df)
-            hf_dataset = hf_dataset.class_encode_column("Label")
+            hf_dataset = hf_dataset.remove_columns(
+                [c for c in ["Label", "Target Type"]]
+            )
+            hf_dataset = hf_dataset.class_encode_column("target")
             dataset_dict = DatasetDict({
                 "train": hf_dataset
             })
 
-            fds = FederatedDataset(
-                dataset=dataset_dict,
+            dataset_dict["train"].info.metadata = {"min_partition_size": 2}  # or whatever number makes sense
+
+            dataset_dict.save_to_disk(DATASET_DIR)
+
+            self.fds = FederatedDataset(
+                dataset=DATASET_DIR,
                 partitioners={"train": partitioner},
+                min_partition_size=2  # pseudo-code: only allow partitions with >=2 examples
             )
-        partition = fds.load_partition(partition_id)
+        partition = self.fds.load_partition(partition_id)
         # Divide data on each node: 80% train, 20% test
         partition_train_test = partition.train_test_split(
             test_size=0.2,
@@ -222,8 +234,17 @@ class DNN:
 
         insdn_data_df["target"] = insdn_data_df[target_column]
 
+        insdn_data_df = insdn_data_df.drop(columns=DROP_COLS, errors="ignore")
+
+        columns_without_labels = insdn_data_df.drop(columns=['Label', 'Target Type']).columns
+        print("Columns in the dataset (excluding 'Label' and 'Target Type'):")
+        print(list(columns_without_labels))
+
         hf_dataset = Dataset.from_pandas(insdn_data_df)
-        hf_dataset = hf_dataset.class_encode_column(target_column)
+        hf_dataset = hf_dataset.remove_columns(
+            [c for c in ["Label", "Target Type"]]
+        )
+        hf_dataset = hf_dataset.class_encode_column("target")
 
         # Deterministic split
         dataset = hf_dataset.train_test_split(test_size=0.2, seed=42)
@@ -242,9 +263,7 @@ class DNN:
         """
 
         # 1️⃣ Extract target
-        y = np.asarray(batch["Label"], dtype=np.int64)  # shape: (batch_size,)
-
-        print(y.dtype, y[:5])
+        y = np.asarray(batch["target"], dtype=np.int64)  # shape: (batch_size,)
 
         # 2️⃣ Extract features (everything except target)
         feature_cols = [k for k in batch.keys() if k != "target"]
@@ -360,10 +379,24 @@ class DNN:
         total_samples = 0
 
         for batch in testloader:
-            x = batch["x"]  # (input_size, batch_size)
-            y = batch["y"]  # (output_size, batch_size)
+            x = batch["x"]
+            y = batch["y"]
 
-            batch_size = x.shape[0]
+            # Torch → NumPy
+            x = x.detach().cpu().numpy()
+            y = y.detach().cpu().numpy()
+
+            # Ensure batch dimension
+            if x.ndim == 1:
+                x = x[None, :]     # (1, input_size)
+            if y.ndim == 1:
+                y = y[None, :]     # (1, num_classes)
+
+            # Convert to DNN format
+            x = x.T               # (input_size, batch_size)
+            y = y.T               # (num_classes, batch_size)
+
+            batch_size = x.shape[1]
 
             # ---- Inference timing ----
             start = time.perf_counter()
@@ -417,11 +450,21 @@ def dnn_to_arrays(model: DNN):
 
 
 def arrays_to_dnn(model: DNN, arrays):
-    # Convert ArrayRecord -> list
-    arrays_list = list(arrays) if not isinstance(arrays, list) else arrays
+    arrays_list = list(arrays)
+
     n_w = len(model.weights)
-    model.weights = arrays_list[:n_w]
-    model.biases = arrays_list[n_w:]
+    n_b = len(model.biases)
+
+    assert len(arrays_list) == n_w + n_b, (
+        f"Expected {n_w + n_b} arrays, got {len(arrays_list)}"
+    )
+
+    model.weights = [
+        np.asarray(w, dtype=np.float64) for w in arrays_list[:n_w]
+    ]
+    model.biases = [
+        np.asarray(b, dtype=np.float64) for b in arrays_list[n_w:]
+    ]
 
 def relu(z):
     return np.maximum(0, z)

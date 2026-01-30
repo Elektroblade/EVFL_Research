@@ -34,14 +34,20 @@ def train(msg: Message, context: Context):
         activation=relu,
         task_type=TASK_TYPE,
     )
-    arrays_to_dnn(model, msg.content["arrays"].to_numpy())
+
+    print("calling arrays_to_dnn...")
+    arrays_to_dnn(model, msg.content["arrays"]) # removed to_numpy
+
+    print("weights[0] type:", type(model.weights[0]))
+    print("weights[0] shape:", model.weights[0].shape)
+    print("biases[0] shape:", model.biases[0].shape)
     # here i would put the model on gpu but can't
 
     # Load the data
     partition_id = context.node_config["partition-id"]
     num_partitions = context.node_config["num-partitions"]
     batch_size = context.run_config["batch-size"]
-    trainloader, _ = load_data(partition_id, num_partitions, batch_size)
+    trainloader, _ = model.load_data(partition_id, num_partitions, batch_size)
 
     # Call the training function
     train_loss = model.train(
@@ -74,13 +80,13 @@ def evaluate(msg: Message, context: Context):
         activation=relu,
         task_type=TASK_TYPE,
     )
-    arrays_to_dnn(model, msg.content["arrays"].to_numpy())
+    arrays_to_dnn(model, msg.content["arrays"])
 
     # Load the data
     partition_id = context.node_config["partition-id"]
     num_partitions = context.node_config["num-partitions"]
     batch_size = context.run_config["batch-size"]
-    _, valloader = load_data(partition_id, num_partitions, batch_size)
+    _, valloader = model.load_data(partition_id, num_partitions, batch_size)
 
     # Call the evaluation function
     preds, probs, y_true, avg_inf_ms = model.predict(valloader)
