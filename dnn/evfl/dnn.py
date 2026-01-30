@@ -113,7 +113,6 @@ class DNN:
         exp_z = np.exp(z)
         return exp_z / np.sum(exp_z, axis=0, keepdims=True)
 
-
     
     def load_data(self, partition_id: int, num_partitions: int, batch_size: int, target_column: str = "Label",):
         """Load partition CIFAR10 data."""
