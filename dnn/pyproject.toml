@@ -34,17 +34,33 @@ num-partitions = 3
 partition-id = 0
 min-partition-size = 2
 
-[tool.flwr.federations]
-default = "local-simulation"
 
-[tool.flwr.federations.local-simulation]
-options.num-supernodes = 3
+#######################################################################
+# CONFIGURATION MIGRATION NOTICE:
+#
+# What was previously called "federation config" for SuperLink
+# connections in pyproject.toml has been renamed and moved.
+#
+# These settings are now **SuperLink connection configuration**
+# and are defined in the Flower configuration file.
+#
+# The entries below are commented out intentionally and are kept
+# only as a migration reference.
+#
+# Docs: https://flower.ai/docs/framework/ref-flower-configuration.html
+#######################################################################
 
-[tool.flwr.federations.local-simulation-gpu]
-options.num-supernodes = 3
-options.backend.client-resources.num-cpus = 2 # each ClientApp assumes to use 2CPUs
-options.backend.client-resources.num-gpus = 0.2 # at most 5 ClientApp will run in a given GPU
+# [tool.flwr.federations]
+# default = "local-simulation"
 
-[tool.flwr.federations.supergrid-deployment]
-address = "supergrid.flower.ai"
-enable-account-auth = true
+# [tool.flwr.federations.local-simulation]
+# options.num-supernodes = 3
+
+# [tool.flwr.federations.local-simulation-gpu]
+# options.num-supernodes = 3
+# options.backend.client-resources.num-cpus = 2 # each ClientApp assumes to use 2CPUs
+# options.backend.client-resources.num-gpus = 0.2 # at most 5 ClientApp will run in a given GPU
+
+# [tool.flwr.federations.supergrid-deployment]
+# address = "supergrid.flower.ai"
+# enable-account-auth = true

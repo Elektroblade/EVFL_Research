@@ -116,7 +116,7 @@ class ClientDNN:
         if self.fds is None:
             partitioner = VerticalSizePartitioner(
                 partition_sizes=PARTITION_SIZES,
-                active_party_columns=["Label"],          # label exists
+                active_party_columns=["target"],          # label exists
                 active_party_columns_mode="create_as_last",
             )
 
@@ -133,8 +133,8 @@ class ClientDNN:
         print(f"[Client {partition_id}] columns:", partition.column_names)
 
         # ---- Drop label if present (safety) ----
-        if "Label" in partition.column_names:
-            partition = partition.remove_columns(["Label"])
+        if "target" in partition.column_names:
+            partition = partition.remove_columns(["target"])
 
         # ---- Train / test split (must be deterministic) ----
         partition = partition.train_test_split(

@@ -266,7 +266,7 @@ class ServerDNN:
         # ------------------------------------------------------
         partitioner = VerticalSizePartitioner(
             partition_sizes=PARTITION_SIZES,
-            active_party_columns=["Label"],
+            active_party_columns=["target"],
             active_party_columns_mode="create_as_last",
         )
 
@@ -284,7 +284,7 @@ class ServerDNN:
         print("[Server] label columns:", label_partition.column_names)
 
         # ---- Safety: ensure only Label is present ----
-        assert label_partition.column_names == ["Label"]
+        assert label_partition.column_names == ["target"]
 
         # ---- Deterministic train / test split ----
         label_partition = label_partition.train_test_split(
@@ -312,7 +312,7 @@ class ServerDNN:
         # ------------------------------------------------------
         def numpy_label_generator(dataloader):
             for batch in dataloader:
-                y = batch["Label"]
+                y = batch["target"]
 
                 # ---- Convert to NumPy ----
                 if isinstance(y, torch.Tensor):

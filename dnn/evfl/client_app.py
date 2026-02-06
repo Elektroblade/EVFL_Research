@@ -30,8 +30,8 @@ client_model: ClientDNN | None = None
 client_dataloader = None
 
 
-@app.on_start()
-def on_start(context: Context):
+def start_client_app(context: Context):
+    """Initialize client model and data loader"""
     global client_model, client_dataloader, last_batch_x
 
     partition_id = context.node_config["partition-id"]
@@ -59,8 +59,6 @@ def on_start(context: Context):
     last_batch_x = None
 
 
-
-@app.handle("forward")
 def forward(msg: Message, context: Context):
     global client_model, client_dataloader, last_batch_x
 
@@ -91,7 +89,6 @@ def forward(msg: Message, context: Context):
     )
 
 
-@app.handle("backward")
 def backward(msg: Message, context: Context):
     global client_model, last_batch_x
 
