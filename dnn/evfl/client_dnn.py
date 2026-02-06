@@ -1,0 +1,239 @@
+import numpy as np
+import pandas as pd
+from flwr_datasets import FederatedDataset
+from flwr_datasets.partitioner import IidPartitioner, VerticalSizePartitioner
+from datasets import Dataset
+from datasets import DatasetDict
+import time
+import numpy as np
+import random
+import torch
+from pathlib import Path
+from torch.utils.data import DataLoader
+from datasets import load_from_disk
+
+from evfl.dnn import (
+    DNN,
+    INPUT_SIZE,
+    OUTPUT_SIZE,
+    HIDDEN_LAYERS,
+    NEURONS_PER_LAYER,
+    PARTITION_SIZES,
+    TASK_TYPE,
+    DATASET_DIR,
+    SEED,
+    dnn_to_arrays,
+    arrays_to_dnn,
+    relu
+)
+
+class ClientDNN:
+    def __init__(self, input_size, hidden_layers, neurons_per_layer, activation):
+        self.activation = activation
+        self.weights = []
+        self.biases = []
+
+        layer_sizes = [input_size] + [neurons_per_layer] * hidden_layers
+
+        for i in range(len(layer_sizes) - 1):
+            self.weights.append(
+                np.random.randn(layer_sizes[i+1], layer_sizes[i])
+            )
+            self.biases.append(
+                np.random.randn(layer_sizes[i+1], 1)
+            )
+
+    def forward(self, x):
+        activations = x
+        for w, b in zip(self.weights, self.biases):
+            activations = self.activation(w @ activations + b)
+        return activations
+
+    def backward(self, x, grad_from_server):
+        """
+        Backward pass for ClientDNN in Vertical Federated Learning.
+
+        Args:
+            x: client feature matrix, shape (d_client, B)
+            grad_from_server: gradient w.r.t. client embedding, shape (h_dim, B)
+
+        Returns:
+            gradients_w: gradients for client weights
+            gradients_b: gradients for client biases
+        """
+
+        batch_size = x.shape[1]
+
+        # ---- Feedforward (client-side only) ----
+        activations = [x]
+        weighted_sums = []
+
+        num_layers = len(self.weights)
+
+        for i in range(num_layers):
+            z = self.weights[i] @ activations[-1] + self.biases[i]
+            weighted_sums.append(z)
+
+            # Client always uses hidden activation (no output layer)
+            a = self.activation(z)
+            activations.append(a)
+
+        # ---- Backward pass starts from server gradient ----
+        delta = grad_from_server * self.activation_derivative(weighted_sums[-1])
+
+        gradients_w = [np.zeros_like(w) for w in self.weights]
+        gradients_b = [np.zeros_like(b) for b in self.biases]
+
+        gradients_w[-1] = (delta @ activations[-2].T) / batch_size
+        gradients_b[-1] = np.mean(delta, axis=1, keepdims=True)
+
+        # ---- Propagate through remaining client layers ----
+        for i in range(num_layers - 2, -1, -1):
+            delta = (self.weights[i + 1].T @ delta) * self.activation_derivative(weighted_sums[i])
+            gradients_w[i] = (delta @ activations[i].T) / batch_size
+            gradients_b[i] = np.mean(delta, axis=1, keepdims=True)
+
+        # ---- Safety checks ----
+        for i, (w, b, dw, db) in enumerate(zip(self.weights, self.biases, gradients_w, gradients_b)):
+            assert dw.shape == w.shape, f"Layer {i}: dw {dw.shape} vs w {w.shape}"
+            assert db.shape == b.shape, f"Layer {i}: db {db.shape} vs b {b.shape}"
+
+        return gradients_w, gradients_b
+    
+    def load_data(
+        self,
+        partition_id: int,
+        num_partitions: int,
+        batch_size: int,
+        target_column: str = "Label",
+    ):
+        """Load vertically-partitioned data for VFL clients."""
+
+        if self.fds is None:
+            partitioner = VerticalSizePartitioner(
+                partition_sizes=PARTITION_SIZES,
+                active_party_columns=["target"],
+                active_party_columns_mode="create_as_last",
+            )
+            self.fds = FederatedDataset(
+                dataset=DATASET_DIR,
+                partitioners={"train": partitioner},
+            )
+
+        # ------------------------------------------------------
+        # Load THIS CLIENT'S VERTICAL SLICE
+        # ------------------------------------------------------
+        partition = self.fds.load_partition(partition_id)
+
+        print(f"[Client {partition_id}] columns:", partition.column_names)
+
+        # Train / test split
+        partition = partition.train_test_split(
+            test_size=0.2,
+            seed=SEED,
+        )
+
+        partition = partition.with_transform(self.apply_transforms)
+        g = torch.Generator()
+        g.manual_seed(SEED)
+
+        trainloader = DataLoader(
+            partition["train"],
+            batch_size=None,
+            shuffle=True,
+            generator=g,
+        )
+        testloader = DataLoader(
+            partition["test"],
+            batch_size=None,
+            shuffle=False,
+        )
+
+        return trainloader, testloader
+    
+    def apply_transforms(self, batch):
+        """
+        Transform HF batch into NumPy arrays compatible with the custom DNN.
+        """
+
+        # 1️⃣ Extract target
+        y = np.asarray(batch["target"], dtype=np.int64)  # shape: (batch_size,)
+
+        X = np.stack([batch[col] for col in self.feature_cols], axis=1)
+        # X shape: (batch_size, input_size)
+
+        # 3️⃣ Transpose for DNN
+        X = X.T  # (input_size, batch_size)
+        X = X.astype(np.float32)
+
+        # 4️⃣ Encode targets
+        if self.task_type == "binary":
+            y = y.astype(np.float32).reshape(1, -1)  # (1, batch_size)
+
+        elif self.task_type == "multiclass":
+            num_classes = self.num_classes
+            y_onehot = np.zeros((y.shape[0], num_classes), dtype=np.float32)
+            y_onehot[np.arange(y.shape[0]), y] = 1
+
+            y = y_onehot.T
+
+        else:  # regression
+            y = y.reshape(self.output_size, -1)
+
+        return {
+            "x": X,
+            "y": y,
+        }
+    
+    def predict(self, testloader):
+        """
+        Run inference on the client features (ClientDNN).
+
+        Returns:
+            activations: list of np.ndarray, each of shape (neurons_last_layer, batch_size)
+            real_values: np.ndarray of true labels (only if available)
+            avg_inference_time_ms: float
+        """
+        all_activations = []
+        all_real_values = []
+
+        total_time = 0.0
+        total_samples = 0
+
+        for batch in testloader:
+            x = batch["x"]  # (input_size, batch_size)
+            y = batch.get("y")  # may be None for some clients
+
+            batch_size = x.shape[1]
+
+            # ---- Inference timing ----
+            start = time.perf_counter()
+            activations, _ = self.forward(x)  # use client's forward method
+            end = time.perf_counter()
+
+            total_time += (end - start)
+            total_samples += batch_size
+
+            all_activations.append(activations[-1])  # only last hidden layer
+
+            if y is not None:
+                # reshape for consistency
+                all_real_values.extend(y.flatten())
+
+        avg_inference_time_ms = (total_time / total_samples) * 1000.0
+
+        return (
+            all_activations,                # list of client activations per batch
+            np.array(all_real_values) if all_real_values else None,
+            avg_inference_time_ms
+        )
+
+
+def sigmoid(z):
+    return 1 / (1 + np.exp(-z))
+
+def softmax(z):
+    z = z - np.max(z, axis=0, keepdims=True)
+    exp_z = np.exp(z)
+    return exp_z / np.sum(exp_z, axis=0, keepdims=True)
+

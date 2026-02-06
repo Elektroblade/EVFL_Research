@@ -1,7 +1,7 @@
 import numpy as np
 import pandas as pd
 from flwr_datasets import FederatedDataset
-from flwr_datasets.partitioner import IidPartitioner
+from flwr_datasets.partitioner import IidPartitioner, VerticalSizePartitioner
 from datasets import Dataset
 from datasets import DatasetDict
 import time
@@ -10,8 +10,9 @@ import random
 import torch
 from pathlib import Path
 from torch.utils.data import DataLoader
+from datasets import load_from_disk
 
-INPUT_SIZE = 78
+INPUT_SIZE = 79
 OUTPUT_SIZE = 3
 HIDDEN_LAYERS = 2
 NEURONS_PER_LAYER = 64
@@ -25,6 +26,7 @@ DROP_COLS = [
     "Timestamp"
 ]
 DATASET_DIR = "datasets/insdn_hf_dataset"
+PARTITION_SIZES = [26, 26, 25]
 
 class DNN:
     def __init__(self, input_size, output_size, hidden_layers, neurons_per_layer, learning_rate, activation, task_type="multiclass"):
@@ -77,33 +79,47 @@ class DNN:
 
     
     def backpropagation(self, x, y):
-        gradients_w = [np.zeros(weight.shape) for weight in self.weights]
-        gradients_b = [np.zeros(bias.shape) for bias in self.biases]
-        
-        # Feedforward
+        gradients_w = [np.zeros_like(w) for w in self.weights]
+        gradients_b = [np.zeros_like(b) for b in self.biases]
+
+        batch_size = x.shape[1]
+
+        # ---- Feedforward ----
         activations = [x]
         weighted_sums = []
-        
+
         for i in range(self.hidden_layers + 1):
-            weighted_sum = np.dot(self.weights[i], activations[i]) + self.biases[i]
-            weighted_sums.append(weighted_sum)
-            activation_output = self.activation(weighted_sum)
-            activations.append(activation_output)
-        
-        # Backpropagation
+            z = self.weights[i] @ activations[i] + self.biases[i]
+            weighted_sums.append(z)
+
+            if i == self.hidden_layers:
+                a = self.output_activation(z)
+            else:
+                a = self.activation(z)
+
+            activations.append(a)
+
+        # ---- Output layer delta ----
         if self.task_type in ["binary", "multiclass"]:
             delta = activations[-1] - y
         else:
             delta = (activations[-1] - y) * self.activation_derivative(weighted_sums[-1])
-        gradients_w[-1] = np.dot(delta, activations[-2].T)
-        gradients_b[-1] = delta
-        
+
+        gradients_w[-1] = (delta @ activations[-2].T) / batch_size
+        gradients_b[-1] = np.mean(delta, axis=1, keepdims=True)
+
+        # ---- Hidden layers ----
         for i in range(self.hidden_layers - 1, -1, -1):
-            delta = np.dot(self.weights[i+1].T, delta) * self.activation_derivative(weighted_sums[i])
-            gradients_w[i] = np.dot(delta, activations[i].T)
-            gradients_b[i] = delta
-        
+            delta = (self.weights[i + 1].T @ delta) * self.activation_derivative(weighted_sums[i])
+            gradients_w[i] = (delta @ activations[i].T) / batch_size
+            gradients_b[i] = np.mean(delta, axis=1, keepdims=True)
+
+        for i, (w, b, dw, db) in enumerate(zip(self.weights, self.biases, gradients_w, gradients_b)):
+            assert dw.shape == w.shape, f"Layer {i}: dw {dw.shape} vs w {w.shape}"
+            assert db.shape == b.shape, f"Layer {i}: db {db.shape} vs b {b.shape}"
+
         return gradients_w, gradients_b
+
     
     def sigmoid(z):
         return 1 / (1 + np.exp(-z))
@@ -117,9 +133,12 @@ class DNN:
     def load_data(self, partition_id: int, num_partitions: int, batch_size: int, target_column: str = "Label",):
         """Load partition CIFAR10 data."""
         # Only initialize `FederatedDataset` once
+        partitioner = VerticalSizePartitioner(
+            partition_sizes=PARTITION_SIZES,
+            active_party_columns="target",
+            active_party_columns_mode="create_as_last",
+        )
         if self.fds is None:
-            partitioner = IidPartitioner(num_partitions=num_partitions)
-
             THIS_DIR = Path(__file__).resolve().parent
             PROJECT_ROOT = THIS_DIR.parents[1]   # evfl → dnn → EVFL_Research
             DATA_DIR = PROJECT_ROOT / "InSDN_DatasetCSV" / "InSDN_DatasetCSV"
@@ -156,28 +175,37 @@ class DNN:
             insdn_data_df = insdn_data_df.drop(columns=DROP_COLS, errors="ignore")
 
             columns_without_labels = insdn_data_df.drop(columns=['Label', 'Target Type']).columns
-            print("Columns in the dataset (excluding 'Label' and 'Target Type'):")
-            print(list(columns_without_labels))
+            #print("Columns in the dataset (excluding 'Label' and 'Target Type'):")
+            #print(list(columns_without_labels))
 
             hf_dataset = Dataset.from_pandas(insdn_data_df)
             hf_dataset = hf_dataset.remove_columns(
                 [c for c in ["Label", "Target Type"]]
             )
             hf_dataset = hf_dataset.class_encode_column("target")
+
+            self.feature_cols = [
+                c for c in hf_dataset.column_names if c != "target"
+            ]
+
             dataset_dict = DatasetDict({
                 "train": hf_dataset
             })
 
-            dataset_dict["train"].info.metadata = {"min_partition_size": 2}  # or whatever number makes sense
+            #dataset_dict["train"].info.metadata = {"min_partition_size": 2}  # or whatever number makes sense
 
-            dataset_dict.save_to_disk(DATASET_DIR)
+            #dataset_dict.save_to_disk(DATASET_DIR)
+
+            dataset_dict = load_from_disk(DATASET_DIR)
+            print("Columns available in dataset_dict:", dataset_dict["train"].column_names)
 
             self.fds = FederatedDataset(
                 dataset=DATASET_DIR,
                 partitioners={"train": partitioner},
-                min_partition_size=2  # pseudo-code: only allow partitions with >=2 examples
             )
-        partition = self.fds.load_partition(partition_id)
+        dataset = load_from_disk(DATASET_DIR)
+        partition = partitioner.load_partition(partition_id)
+        print("Columns in this partition:", partition.column_names)
         # Divide data on each node: 80% train, 20% test
         partition_train_test = partition.train_test_split(
             test_size=0.2,
@@ -236,14 +264,17 @@ class DNN:
         insdn_data_df = insdn_data_df.drop(columns=DROP_COLS, errors="ignore")
 
         columns_without_labels = insdn_data_df.drop(columns=['Label', 'Target Type']).columns
-        print("Columns in the dataset (excluding 'Label' and 'Target Type'):")
-        print(list(columns_without_labels))
+        #print("Columns in the dataset (excluding 'Label' and 'Target Type'):")
+        #print(list(columns_without_labels))
 
         hf_dataset = Dataset.from_pandas(insdn_data_df)
         hf_dataset = hf_dataset.remove_columns(
             [c for c in ["Label", "Target Type"]]
         )
         hf_dataset = hf_dataset.class_encode_column("target")
+        self.feature_cols = [
+            c for c in hf_dataset.column_names if c != "target"
+        ]
 
         # Deterministic split
         dataset = hf_dataset.train_test_split(test_size=0.2, seed=42)
@@ -264,25 +295,23 @@ class DNN:
         # 1️⃣ Extract target
         y = np.asarray(batch["target"], dtype=np.int64)  # shape: (batch_size,)
 
-        # 2️⃣ Extract features (everything except target)
-        feature_cols = [k for k in batch.keys() if k != "target"]
-        X = np.stack([batch[col] for col in feature_cols], axis=1)
+        X = np.stack([batch[col] for col in self.feature_cols], axis=1)
         # X shape: (batch_size, input_size)
 
         # 3️⃣ Transpose for DNN
         X = X.T  # (input_size, batch_size)
+        X = X.astype(np.float32)
 
         # 4️⃣ Encode targets
         if self.task_type == "binary":
-            y = y.reshape(1, -1)  # (1, batch_size)
+            y = y.astype(np.float32).reshape(1, -1)  # (1, batch_size)
 
         elif self.task_type == "multiclass":
-            y_onehot = np.zeros((self.output_size, y.shape[0]))
-            num_classes = self.num_classes  # or infer from model
+            num_classes = self.num_classes
             y_onehot = np.zeros((y.shape[0], num_classes), dtype=np.float32)
             y_onehot[np.arange(y.shape[0]), y] = 1
 
-            y = y_onehot  # (output_size, batch_size)
+            y = y_onehot.T
 
         else:  # regression
             y = y.reshape(self.output_size, -1)
@@ -310,6 +339,15 @@ class DNN:
 
                 # ---- Forward + backward ----
                 gradients_w, gradients_b = self.backpropagation(x, y)
+
+                for i, (gw, gb) in enumerate(zip(gradients_w, gradients_b)):
+                    print(
+                        f"Layer {i}: "
+                        f"gw shape={np.shape(gw)}, "
+                        f"gb shape={np.shape(gb)}, "
+                        f"w shape={self.weights[i].shape}, "
+                        f"b shape={self.biases[i].shape}"
+                    )
 
                 # ---- Gradient descent update ----
                 self.weights = [
@@ -445,7 +483,11 @@ class DNN:
         )
 
 def dnn_to_arrays(model: DNN):
-    return model.weights + model.biases
+    arrays = []
+    for w, b in zip(model.weights, model.biases):
+        arrays.append(w)
+        arrays.append(b)
+    return arrays
 
 
 def arrays_to_dnn(model: DNN, arrays):

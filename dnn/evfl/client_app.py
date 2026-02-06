@@ -10,65 +10,85 @@ from evfl.dnn import (
     OUTPUT_SIZE,
     HIDDEN_LAYERS,
     NEURONS_PER_LAYER,
+    PARTITION_SIZES,
     TASK_TYPE,
     dnn_to_arrays,
     arrays_to_dnn,
     relu
 )
+from evfl.client_dnn import (
+    ClientDNN
+)
 
 # Flower ClientApp
 app = ClientApp()
 
+# ---- Global model (persistent across rounds) ----
+client_model: ClientDNN | None = None
+client_dataloader = None
 
-@app.train()
-def train(msg: Message, context: Context):
-    """Train the model on local data."""
 
-    # Load the model and initialize it with the received weights
-    model = DNN(
-        input_size=INPUT_SIZE,
-        output_size=OUTPUT_SIZE,
+@app.main()
+def main(context: Context):
+    global client_model, client_dataloader
+
+    client_model = ClientDNN(
+        input_size=PARTITION_SIZES[context.partition_id],
         hidden_layers=HIDDEN_LAYERS,
         neurons_per_layer=NEURONS_PER_LAYER,
-        learning_rate=msg.content["config"]["lr"],
         activation=relu,
-        task_type=TASK_TYPE,
     )
 
-    print("calling arrays_to_dnn...")
-    arrays_to_dnn(model, msg.content["arrays"]) # removed to_numpy
-
-    print("weights[0] type:", type(model.weights[0]))
-    print("weights[0] shape:", model.weights[0].shape)
-    print("biases[0] shape:", model.biases[0].shape)
-    # here i would put the model on gpu but can't
-
-    # Load the data
     partition_id = context.node_config["partition-id"]
     num_partitions = context.node_config["num-partitions"]
     batch_size = context.run_config["batch-size"]
-    trainloader, _ = model.load_data(partition_id, num_partitions, batch_size)
 
-    # Call the training function
-    train_loss = model.train(
-        trainloader,
-        max_epochs=context.run_config["local-epochs"],
+    client_dataloader = iter(
+        client_model.load_data(partition_id, num_partitions, batch_size)
     )
 
-    # Construct and return reply Message
-    model_record = ArrayRecord(dnn_to_arrays(model))
-    metrics = {
-        "train_loss": train_loss,
-        "num-examples": len(trainloader.dataset),
-    }
-    metric_record = MetricRecord(metrics)
-    content = RecordDict({"arrays": model_record, "metrics": metric_record})
-    return Message(content=content, reply_to=msg)
+
+@app.handle("forward")
+def forward(msg: Message, context: Context):
+    global client_model, client_dataloader
+
+    try:
+        batch = next(client_dataloader)
+    except StopIteration:
+        # restart epoch deterministically
+        client_dataloader = iter(client_model.load_data(
+            context.node_config["partition-id"],
+            context.node_config["num-partitions"],
+            context.run_config["batch-size"],
+        ))
+        batch = next(client_dataloader)
+
+    X = batch["x"]   # features only
+
+    h = client_model.forward(X)
+
+    return Message(
+        content=RecordDict({
+            "activations": h
+        }),
+        reply_to=msg,
+    )
 
 
+@app.handle("backward")
+def backward(msg: Message, context: Context):
+    global client_model
+
+    grad_h = msg.content["grads"]
+    client_model.backward(grad_h)
+
+    return Message(content=RecordDict({}), reply_to=msg)
+
+
+"""
 @app.evaluate()
 def evaluate(msg: Message, context: Context):
-    """Evaluate the model on local data."""
+    Evaluate the model on local data.
 
     # Load the model and initialize it with the received weights
     model = DNN(
@@ -83,7 +103,7 @@ def evaluate(msg: Message, context: Context):
     arrays_to_dnn(model, msg.content["arrays"])
 
     # Load the data
-    partition_id = context.node_config["partition-id"]
+    partition_id = context.node_id
     num_partitions = context.node_config["num-partitions"]
     batch_size = context.run_config["batch-size"]
     _, valloader = model.load_data(partition_id, num_partitions, batch_size)
@@ -102,3 +122,5 @@ def evaluate(msg: Message, context: Context):
     metric_record = MetricRecord(metrics)
     content = RecordDict({"metrics": metric_record})
     return Message(content=content, reply_to=msg)
+
+"""
