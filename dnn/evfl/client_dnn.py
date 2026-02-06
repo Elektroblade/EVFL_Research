@@ -24,12 +24,14 @@ from evfl.dnn import (
     SEED,
     dnn_to_arrays,
     arrays_to_dnn,
-    relu
+    relu,
+    relu_derivative
 )
 
 class ClientDNN:
-    def __init__(self, input_size, hidden_layers, neurons_per_layer, activation):
+    def __init__(self, input_size, hidden_layers, neurons_per_layer, activation, activation_derivative):
         self.activation = activation
+        self.activation_derivative = activation_derivative
         self.weights = []
         self.biases = []
 
@@ -105,51 +107,74 @@ class ClientDNN:
         partition_id: int,
         num_partitions: int,
         batch_size: int,
-        target_column: str = "Label",
     ):
-        """Load vertically-partitioned data for VFL clients."""
+        """
+        Load vertically-partitioned NIDS data for a VFL client.
+        Client sees FEATURES ONLY.
+        """
 
         if self.fds is None:
             partitioner = VerticalSizePartitioner(
                 partition_sizes=PARTITION_SIZES,
-                active_party_columns=["target"],
+                active_party_columns=["Label"],          # label exists
                 active_party_columns_mode="create_as_last",
             )
+
             self.fds = FederatedDataset(
                 dataset=DATASET_DIR,
                 partitioners={"train": partitioner},
             )
 
         # ------------------------------------------------------
-        # Load THIS CLIENT'S VERTICAL SLICE
+        # Load THIS CLIENT'S vertical slice (features only)
         # ------------------------------------------------------
         partition = self.fds.load_partition(partition_id)
 
         print(f"[Client {partition_id}] columns:", partition.column_names)
 
-        # Train / test split
+        # ---- Drop label if present (safety) ----
+        if "Label" in partition.column_names:
+            partition = partition.remove_columns(["Label"])
+
+        # ---- Train / test split (must be deterministic) ----
         partition = partition.train_test_split(
             test_size=0.2,
             seed=SEED,
         )
 
+        # ---- Apply preprocessing (normalization, etc.) ----
         partition = partition.with_transform(self.apply_transforms)
-        g = torch.Generator()
-        g.manual_seed(SEED)
+
+        g = torch.Generator().manual_seed(SEED)
 
         trainloader = DataLoader(
             partition["train"],
-            batch_size=None,
+            batch_size=batch_size,
             shuffle=True,
             generator=g,
         )
+
         testloader = DataLoader(
             partition["test"],
-            batch_size=None,
+            batch_size=batch_size,
             shuffle=False,
         )
 
-        return trainloader, testloader
+        # ------------------------------------------------------
+        # Wrap loaders to emit NumPy batches
+        # ------------------------------------------------------
+        def numpy_batch_generator(dataloader):
+            for batch in dataloader:
+                # batch is dict[column -> tensor]
+                X = torch.stack(
+                    [batch[col] for col in batch.keys()],
+                    dim=0
+                ).numpy()
+
+                yield {"x": X}
+
+        return numpy_batch_generator(trainloader), numpy_batch_generator(testloader)
+
     
     def apply_transforms(self, batch):
         """

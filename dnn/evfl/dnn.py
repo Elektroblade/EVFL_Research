@@ -481,6 +481,9 @@ class DNN:
             np.array(all_real_values),
             avg_inference_time_ms,
         )
+    
+def relu_derivative(z):
+    return (z > 0).astype(float)
 
 def dnn_to_arrays(model: DNN):
     arrays = []

@@ -14,9 +14,11 @@ from evfl.dnn import (
     NEURONS_PER_LAYER,
     TASK_TYPE,
     PARTITION_SIZES,
+    DATASET_DIR,
     dnn_to_arrays,
     arrays_to_dnn,
-    relu
+    relu,
+    relu_derivative
 )
 from evfl.server_dnn import (
     ServerDNN
@@ -30,27 +32,37 @@ def main(grid: Grid, context: Context) -> None:
     num_rounds = context.run_config["num-server-rounds"]
     lr = context.run_config["learning-rate"]
 
-    # ✅ Server owns ONLY its part of the model
+    # ---- Client embedding dimensions are known to the server ----
+    # Example: {"client_0": 32, "client_1": 64, ...}
+    client_embedding_dims = {
+        f"client_{i}": dim
+        for i, dim in enumerate(PARTITION_SIZES)
+    }
+
+    # ---- Server owns ONLY the top model + labels ----
     server = ServerDNN(
-        input_size=sum(PARTITION_SIZES),   # sum of client output dims
+        client_embedding_dims=client_embedding_dims,
         output_size=OUTPUT_SIZE,
         hidden_layers=HIDDEN_LAYERS,
         neurons_per_layer=NEURONS_PER_LAYER,
         learning_rate=lr,
         activation=relu,
+        activation_derivative=relu_derivative,
         task_type=TASK_TYPE,
     )
 
-    # Server owns labels
-    trainloader = server.load_centralized_labels()
+    # ---- Server owns labels ----
+    trainloader, _ = server.load_centralized_labels(batch_size=context.run_config["batch-size"])
 
     for rnd in range(1, num_rounds + 1):
         print(f"\n[Server] Round {rnd}")
 
         for batch in trainloader:
-            y = batch["y"]  # (output_size, batch_size)
+            y = batch["y"]  # shape: (output_size, B)
 
-            # ---- 1️⃣ Request forward activations ----
+            # ======================================================
+            # 1️⃣ Request client forward passes
+            # ======================================================
             results = grid.run(
                 app_fn="forward",
                 message=Message(
@@ -60,47 +72,65 @@ def main(grid: Grid, context: Context) -> None:
                 ),
             )
 
-            # ---- 2️⃣ Collect client activations ----
-            client_activations = []
-            client_dims = []
+            # ======================================================
+            # 2️⃣ Collect client embeddings (by client_id)
+            # ======================================================
+            client_embeddings = {}
 
-            for _, reply in results:
-                h_i = reply.content["activations"]
-                client_activations.append(h_i)
-                client_dims.append(h_i.shape[0])
+            for client_id, reply in results:
+                client_embeddings[client_id] = reply.content["activations"]
 
-            # ---- 3️⃣ Concatenate activations ----
-            h = np.vstack(client_activations)
+            # ======================================================
+            # 3️⃣ Concatenate embeddings in fixed order
+            # ======================================================
+            ordered_embeddings = [
+                client_embeddings[cid]
+                for cid in client_embedding_dims.keys()
+            ]
+            H = np.vstack(ordered_embeddings)
 
-            # ---- 4️⃣ Server forward + loss ----
-            y_hat = server.forward(h)
-            loss = server.compute_loss(y_hat, y)
+            # ======================================================
+            # 4️⃣ Server forward + backward
+            # ======================================================
+            grads_w, grads_b, grad_H = server.backward(H, y)
 
-            # ---- 5️⃣ Server backward ----
-            grad_h = server.backward(y_hat, y)
+            # ---- Parameter update (simple SGD) ----
+            for i in range(len(server.weights)):
+                server.weights[i] -= lr * grads_w[i]
+                server.biases[i] -= lr * grads_b[i]
 
-            print(f"[Server] Loss: {loss:.4f}")
+            # ======================================================
+            # 5️⃣ Split embedding gradients per client
+            # ======================================================
+            grad_per_client = server.split_embedding_gradients(grad_H)
 
-            # ---- 6️⃣ Split gradients per client ----
-            grad_parts = []
-            start = 0
-            for dim in client_dims:
-                grad_parts.append(grad_h[start:start + dim, :])
-                start += dim
-
-            # ---- 7️⃣ Send gradients back ----
+            # ======================================================
+            # 6️⃣ Send gradients back to clients
+            # ======================================================
             grid.run(
                 app_fn="backward",
                 message=Message(
                     content=RecordDict({
-                        "grads": grad_parts
+                        "grads": grad_per_client
                     })
                 ),
             )
 
-    # ---- Save final server model ----
-    print("\nSaving final NumPy ServerDNN model...")
-    np.save("server_model.npy", server.to_numpy())
+        print("[Server] Round complete")
+
+    # ==========================================================
+    # 7️⃣ Save final server model
+    # ==========================================================
+    print("\n[Server] Saving final ServerDNN model...")
+
+    server_state = {
+        "weights": server.weights,
+        "biases": server.biases,
+        "client_embedding_dims": server.client_embedding_dims,
+        "task_type": server.task_type,
+    }
+
+    np.save("server_model.npy", server_state)
 
 
 

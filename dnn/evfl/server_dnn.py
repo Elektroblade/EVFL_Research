@@ -20,54 +20,122 @@ from evfl.dnn import (
     NEURONS_PER_LAYER,
     PARTITION_SIZES,
     TASK_TYPE,
+    DATASET_DIR,
     dnn_to_arrays,
     arrays_to_dnn,
-    relu
+    relu,
+    relu_derivative
 )
 
 class ServerDNN:
-    def __init__(self, input_size, output_size, hidden_layers, neurons_per_layer, learning_rate, activation, task_type="multiclass"):
-        assert task_type in ["binary", "multiclass", "regression"], \
-            f"Unsupported task_type: {task_type}"
-        self.fds = None
-        self.task_type = task_type
-        self.input_size = input_size
+    def __init__(
+        self,
+        client_embedding_dims,   # dict: {client_id: dim}
+        output_size,
+        hidden_layers,
+        neurons_per_layer,
+        learning_rate,
+        activation,
+        activation_derivative,
+        task_type="multiclass"
+    ):
+        assert task_type in ["binary", "multiclass", "regression"]
+
+        self.client_embedding_dims = client_embedding_dims
+        self.input_size = sum(client_embedding_dims.values())
         self.output_size = output_size
         self.hidden_layers = hidden_layers
         self.neurons_per_layer = neurons_per_layer
         self.learning_rate = learning_rate
         self.activation = activation
-        if self.task_type == "binary":
+        self.task_type = task_type
+        self.activation_derivative = activation_derivative
+
+        if task_type == "binary":
             self.output_activation = sigmoid
-        elif self.task_type == "multiclass":
+        elif task_type == "multiclass":
             self.output_activation = softmax
         else:
-            self.output_activation = self.activation
-        
+            self.output_activation = lambda x: x
+
+        # ----- Layer sizes -----
+        layer_sizes = (
+            [self.input_size]
+            + [self.neurons_per_layer] * self.hidden_layers
+            + [self.output_size]
+        )
+
         self.weights = []
         self.biases = []
-        
-        # Initialize weights and biases for all layers randomly
-        layer_sizes = [self.input_size] + [self.neurons_per_layer] * self.hidden_layers + [self.output_size]
-        
+
         for i in range(len(layer_sizes) - 1):
-            weight_matrix = np.random.randn(layer_sizes[i+1], layer_sizes[i])
-            bias_vector = np.random.randn(layer_sizes[i+1], 1)
-            
-            self.weights.append(weight_matrix)
-            self.biases.append(bias_vector)
+            self.weights.append(
+                np.random.randn(layer_sizes[i+1], layer_sizes[i])
+            )
+            self.biases.append(
+                np.random.randn(layer_sizes[i+1], 1)
+            )
 
     def forward(self, embeddings):
-        z = self.weights[0] @ embeddings + self.biases[0]
-        return softmax(z)
+        activations = [embeddings]
+        weighted_sums = []
+
+        for i in range(len(self.weights) - 1):
+            z = self.weights[i] @ activations[-1] + self.biases[i]
+            weighted_sums.append(z)
+            a = self.activation(z)
+            activations.append(a)
+
+        # Output layer
+        z_out = self.weights[-1] @ activations[-1] + self.biases[-1]
+        weighted_sums.append(z_out)
+        preds = self.output_activation(z_out)
+
+        return preds, activations, weighted_sums
 
     def backward(self, embeddings, y):
-        preds = self.forward(embeddings)
-        delta = preds - y
-        grad_w = delta @ embeddings.T
-        grad_b = np.mean(delta, axis=1, keepdims=True)
+        batch_size = y.shape[1]
+
+        preds, activations, weighted_sums = self.forward(embeddings)
+
+        # ----- Output layer delta -----
+        if self.task_type in ["binary", "multiclass"]:
+            delta = preds - y
+        else:
+            delta = preds - y
+
+        gradients_w = [None] * len(self.weights)
+        gradients_b = [None] * len(self.biases)
+
+        # ----- Output layer gradients -----
+        gradients_w[-1] = (delta @ activations[-2].T) / batch_size
+        gradients_b[-1] = np.mean(delta, axis=1, keepdims=True)
+
+        # ----- Hidden layers -----
+        for i in range(len(self.weights) - 2, -1, -1):
+            delta = (
+                self.weights[i + 1].T @ delta
+            ) * self.activation_derivative(weighted_sums[i])
+
+            gradients_w[i] = (delta @ activations[i].T) / batch_size
+            gradients_b[i] = np.mean(delta, axis=1, keepdims=True)
+
+        # ----- Gradient w.r.t. concatenated embeddings -----
         grad_embeddings = self.weights[0].T @ delta
-        return grad_w, grad_b, grad_embeddings
+
+        return gradients_w, gradients_b, grad_embeddings
+
+
+    def split_embedding_gradients(self, grad_embeddings):
+        grads = {}
+        start = 0
+
+        for client_id, dim in self.client_embedding_dims.items():
+            grads[client_id] = grad_embeddings[start:start + dim]
+            start += dim
+
+        return grads
+
     
     def train(
         self,
@@ -180,6 +248,88 @@ class ServerDNN:
             np.array(all_real_values),
             avg_inference_time_ms,
         )
+    
+    def load_centralized_labels(
+        self,
+        batch_size: int = None,
+    ):
+        """
+        Load centralized labels for VFL server.
+        Server sees LABELS ONLY.
+        """
+
+        if batch_size is None:
+            raise ValueError("batch_size must be provided for server label loading")
+
+        # ------------------------------------------------------
+        # Create dataset + partitioner (same as clients)
+        # ------------------------------------------------------
+        partitioner = VerticalSizePartitioner(
+            partition_sizes=PARTITION_SIZES,
+            active_party_columns=["Label"],
+            active_party_columns_mode="create_as_last",
+        )
+
+        fds = FederatedDataset(
+            dataset=DATASET_DIR,
+            partitioners={"train": partitioner},
+        )
+
+        # ------------------------------------------------------
+        # Server loads ONLY the active party (labels)
+        # Convention: server uses partition_id = -1
+        # ------------------------------------------------------
+        label_partition = fds.load_partition(-1)
+
+        print("[Server] label columns:", label_partition.column_names)
+
+        # ---- Safety: ensure only Label is present ----
+        assert label_partition.column_names == ["Label"]
+
+        # ---- Deterministic train / test split ----
+        label_partition = label_partition.train_test_split(
+            test_size=0.2,
+            seed=SEED,
+        )
+
+        g = torch.Generator().manual_seed(SEED)
+
+        trainloader = DataLoader(
+            label_partition["train"],
+            batch_size=batch_size,
+            shuffle=True,
+            generator=g,
+        )
+
+        testloader = DataLoader(
+            label_partition["test"],
+            batch_size=batch_size,
+            shuffle=False,
+        )
+
+        # ------------------------------------------------------
+        # Convert Torch batches → NumPy
+        # ------------------------------------------------------
+        def numpy_label_generator(dataloader):
+            for batch in dataloader:
+                y = batch["Label"]
+
+                # ---- Convert to NumPy ----
+                if isinstance(y, torch.Tensor):
+                    y = y.numpy()
+
+                # ---- Shape normalization ----
+                # Binary: (B,) → (1, B)
+                if y.ndim == 1:
+                    y = y.reshape(1, -1)
+
+                # Multiclass one-hot assumed:
+                # y shape already (num_classes, B)
+
+                yield {"y": y}
+
+        return numpy_label_generator(trainloader), numpy_label_generator(testloader)
+
 
 
 def sigmoid(z):

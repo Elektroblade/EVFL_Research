@@ -12,9 +12,11 @@ from evfl.dnn import (
     NEURONS_PER_LAYER,
     PARTITION_SIZES,
     TASK_TYPE,
+    DATASET_DIR,
     dnn_to_arrays,
     arrays_to_dnn,
-    relu
+    relu,
+    relu_derivative
 )
 from evfl.client_dnn import (
     ClientDNN
@@ -28,43 +30,57 @@ client_model: ClientDNN | None = None
 client_dataloader = None
 
 
-@app.main()
-def main(context: Context):
-    global client_model, client_dataloader
-
-    client_model = ClientDNN(
-        input_size=PARTITION_SIZES[context.partition_id],
-        hidden_layers=HIDDEN_LAYERS,
-        neurons_per_layer=NEURONS_PER_LAYER,
-        activation=relu,
-    )
+@app.on_start()
+def on_start(context: Context):
+    global client_model, client_dataloader, last_batch_x
 
     partition_id = context.node_config["partition-id"]
     num_partitions = context.node_config["num-partitions"]
     batch_size = context.run_config["batch-size"]
 
-    client_dataloader = iter(
-        client_model.load_data(partition_id, num_partitions, batch_size)
+    # ---- Initialize client model (feature-only) ----
+    client_model = ClientDNN(
+        input_size=PARTITION_SIZES[partition_id],
+        hidden_layers=HIDDEN_LAYERS,
+        neurons_per_layer=NEURONS_PER_LAYER,
+        activation=relu,
+        activation_derivative=relu_derivative
     )
+
+    # ---- Client owns only its data partition ----
+    trainloader, _ = client_model.load_data(
+        partition_id,
+        num_partitions,
+        batch_size,
+    )
+    client_dataloader = iter(trainloader)
+
+    # Cache for backward pass alignment
+    last_batch_x = None
+
 
 
 @app.handle("forward")
 def forward(msg: Message, context: Context):
-    global client_model, client_dataloader
+    global client_model, client_dataloader, last_batch_x
 
     try:
         batch = next(client_dataloader)
     except StopIteration:
-        # restart epoch deterministically
-        client_dataloader = iter(client_model.load_data(
-            context.node_config["partition-id"],
-            context.node_config["num-partitions"],
-            context.run_config["batch-size"],
-        ))
+        # Restart epoch deterministically
+        client_dataloader = iter(
+            client_model.load_data(
+                context.node_config["partition-id"],
+                context.node_config["num-partitions"],
+                context.run_config["batch-size"],
+            )
+        )
         batch = next(client_dataloader)
 
-    X = batch["x"]   # features only
+    X = batch["x"]   # shape: (d_client, B)
+    last_batch_x = X
 
+    # ---- Client forward pass ----
     h = client_model.forward(X)
 
     return Message(
@@ -77,12 +93,28 @@ def forward(msg: Message, context: Context):
 
 @app.handle("backward")
 def backward(msg: Message, context: Context):
-    global client_model
+    global client_model, last_batch_x
 
-    grad_h = msg.content["grads"]
-    client_model.backward(grad_h)
+    # ---- Gradient w.r.t. client embedding ----
+    grad_h = msg.content["grads"]  # shape: (h_dim, B)
 
-    return Message(content=RecordDict({}), reply_to=msg)
+    # ---- Client backward pass ----
+    grads_w, grads_b = client_model.backward(
+        last_batch_x,
+        grad_h
+    )
+
+    # ---- Client-side parameter update (SGD) ----
+    lr = context.run_config["learning-rate"]
+    for i in range(len(client_model.weights)):
+        client_model.weights[i] -= lr * grads_w[i]
+        client_model.biases[i] -= lr * grads_b[i]
+
+    return Message(
+        content=RecordDict({}),
+        reply_to=msg,
+    )
+
 
 
 """
