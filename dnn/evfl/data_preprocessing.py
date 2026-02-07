@@ -83,7 +83,7 @@ def main():
 
     ds = load_from_disk(DATASET_DIR)
     print(ds["train"].column_names)
-    #print(ds["train"][0]["target"]) 
+    print(ds["train"][0]["target"]) 
 
 def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
     df.columns = df.columns.str.strip()
