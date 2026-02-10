@@ -117,7 +117,7 @@ class ClientDNN:
         if self.has_dataset == False:
             self.partitioner = VerticalSizePartitioner(
                 partition_sizes=PARTITION_SIZES,
-                active_party_columns=["target"],          # label exists
+                active_party_columns="target",          # label exists
                 active_party_columns_mode="create_as_last",
             )
 

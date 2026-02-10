@@ -267,7 +267,7 @@ class ServerDNN:
         # ------------------------------------------------------
         partitioner = VerticalSizePartitioner(
             partition_sizes=PARTITION_SIZES,
-            active_party_columns=["target"],
+            active_party_columns="target",
             active_party_columns_mode="create_as_last",
         )
 
@@ -278,7 +278,7 @@ class ServerDNN:
         # Server loads ONLY the active party (labels)
         # Convention: server uses partition_id = -1
         # ------------------------------------------------------
-        label_partition = partitioner.load_partition(-1)
+        label_partition = partitioner.load_partition(3)
 
         print("[Server] label columns:", label_partition.column_names)
 

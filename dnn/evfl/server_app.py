@@ -66,9 +66,11 @@ def main(grid: Grid, context: Context) -> None:
             results = grid.run(
                 app_fn="forward",
                 message=Message(
-                    content=RecordDict({
-                        "round": rnd
-                    })
+                    content = RecordDict({
+                        "round": MetricRecord({"round": rnd}),
+                    }),
+                    dst_node_id=0,
+                    message_type="forward",
                 ),
             )
 
@@ -107,14 +109,18 @@ def main(grid: Grid, context: Context) -> None:
             # ======================================================
             # 6️⃣ Send gradients back to clients
             # ======================================================
-            grid.run(
-                app_fn="backward",
-                message=Message(
-                    content=RecordDict({
-                        "grads": grad_per_client
-                    })
-                ),
-            )
+            for cid, grad in grad_per_client.items():
+                grid.run(
+                    app_fn="backward",
+                    message=Message(
+                        content=RecordDict({
+                            "grad": ArrayRecord({"grad": grad}),
+                        }),
+                        dst_node_id=0,
+                        message_type="backward",
+                    ),
+                    group_id=cid,
+                )
 
         print("[Server] Round complete")
 
