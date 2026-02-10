@@ -328,6 +328,40 @@ class ServerDNN:
                 yield {"y": y}
 
         return numpy_label_generator(trainloader), numpy_label_generator(testloader)
+    
+    def apply_transforms(self, batch):
+        """
+        Transform HF batch into NumPy arrays compatible with the custom DNN.
+        """
+
+        # 1️⃣ Extract target
+        y = np.asarray(batch["target"], dtype=np.int64)  # shape: (batch_size,)
+
+        X = np.stack([batch[col] for col in self.feature_cols], axis=1)
+        # X shape: (batch_size, input_size)
+
+        # 3️⃣ Transpose for DNN
+        X = X.T  # (input_size, batch_size)
+        X = X.astype(np.float32)
+
+        # 4️⃣ Encode targets
+        if self.task_type == "binary":
+            y = y.astype(np.float32).reshape(1, -1)  # (1, batch_size)
+
+        elif self.task_type == "multiclass":
+            num_classes = self.num_classes
+            y_onehot = np.zeros((y.shape[0], num_classes), dtype=np.float32)
+            y_onehot[np.arange(y.shape[0]), y] = 1
+
+            y = y_onehot.T
+
+        else:  # regression
+            y = y.reshape(self.output_size, -1)
+
+        return {
+            "x": X,
+            "y": y,
+        }
 
 
 

@@ -35,6 +35,7 @@ class ClientDNN:
         self.weights = []
         self.biases = []
         self.has_dataset = False
+        self.feature_cols=None
 
         layer_sizes = [input_size] + [neurons_per_layer] * hidden_layers
 
@@ -136,6 +137,10 @@ class ClientDNN:
         if "target" in partition.column_names:
             partition = partition.remove_columns(["target"])
 
+        self.feature_cols = [
+            c for c in partition.column_names
+        ]
+
         # ---- Train / test split (must be deterministic) ----
         partition = partition.train_test_split(
             test_size=0.2,
@@ -143,7 +148,7 @@ class ClientDNN:
         )
 
         # ---- Apply preprocessing (normalization, etc.) ----
-        partition = partition.with_transform(self.apply_transforms)
+        partition = partition.with_transform(self.apply_transforms_no_labels)
 
         g = torch.Generator().manual_seed(SEED)
 
@@ -176,38 +181,16 @@ class ClientDNN:
         return numpy_batch_generator(trainloader), numpy_batch_generator(testloader)
 
     
-    def apply_transforms(self, batch):
+    def apply_transforms_no_labels(self, batch):
         """
-        Transform HF batch into NumPy arrays compatible with the custom DNN.
+        Client-side VFL transform: FEATURES ONLY
         """
-
-        # 1️⃣ Extract target
-        y = np.asarray(batch["target"], dtype=np.int64)  # shape: (batch_size,)
 
         X = np.stack([batch[col] for col in self.feature_cols], axis=1)
-        # X shape: (batch_size, input_size)
-
-        # 3️⃣ Transpose for DNN
-        X = X.T  # (input_size, batch_size)
-        X = X.astype(np.float32)
-
-        # 4️⃣ Encode targets
-        if self.task_type == "binary":
-            y = y.astype(np.float32).reshape(1, -1)  # (1, batch_size)
-
-        elif self.task_type == "multiclass":
-            num_classes = self.num_classes
-            y_onehot = np.zeros((y.shape[0], num_classes), dtype=np.float32)
-            y_onehot[np.arange(y.shape[0]), y] = 1
-
-            y = y_onehot.T
-
-        else:  # regression
-            y = y.reshape(self.output_size, -1)
+        X = X.T.astype(np.float32)  # (input_size, batch_size)
 
         return {
-            "x": X,
-            "y": y,
+            "x": X
         }
     
     def predict(self, testloader):

@@ -4,6 +4,8 @@ import torch
 from flwr.app import ArrayRecord, ConfigRecord, Context, MetricRecord, Message, RecordDict
 from flwr.serverapp import Grid, ServerApp
 from flwr.serverapp.strategy import FedAvg
+from logging import INFO
+from flwr.common import log
 import numpy as np
 
 from evfl.dnn import (
@@ -24,22 +26,31 @@ from evfl.server_dnn import (
     ServerDNN
 )
 
+# ---------------------------------------------------------------------
 # Create ServerApp
+# ---------------------------------------------------------------------
 app = ServerApp()
+
 
 @app.main()
 def main(grid: Grid, context: Context) -> None:
-    num_rounds = context.run_config["num-server-rounds"]
-    lr = context.run_config["learning-rate"]
+    # ------------------------------------------------------------
+    # Run config
+    # ------------------------------------------------------------
+    num_rounds: int = context.run_config["num-server-rounds"]
+    lr: float = context.run_config["learning-rate"]
+    batch_size: int = context.run_config["batch-size"]
 
-    # ---- Client embedding dimensions are known to the server ----
-    # Example: {"client_0": 32, "client_1": 64, ...}
+    # ------------------------------------------------------------
+    # Client embedding dimensions (fixed & known)
+    # ------------------------------------------------------------
     client_embedding_dims = {
-        f"client_{i}": dim
-        for i, dim in enumerate(PARTITION_SIZES)
+        f"client_{i}": dim for i, dim in enumerate(PARTITION_SIZES)
     }
 
-    # ---- Server owns ONLY the top model + labels ----
+    # ------------------------------------------------------------
+    # Server-side DNN head (NumPy)
+    # ------------------------------------------------------------
     server = ServerDNN(
         client_embedding_dims=client_embedding_dims,
         output_size=OUTPUT_SIZE,
@@ -51,83 +62,125 @@ def main(grid: Grid, context: Context) -> None:
         task_type=TASK_TYPE,
     )
 
-    # ---- Server owns labels ----
-    trainloader, _ = server.load_centralized_labels(batch_size=context.run_config["batch-size"])
+    # ------------------------------------------------------------
+    # Server owns labels ONLY
+    # ------------------------------------------------------------
+    trainloader, _ = server.load_centralized_labels(batch_size=batch_size)
 
+    node_ids = list(grid.get_node_ids())
+    log(INFO, "Connected clients: %s", node_ids)
+
+    if len(node_ids) != len(client_embedding_dims):
+        raise ValueError(
+            f"Expected {len(client_embedding_dims)} clients, "
+            f"but got {len(node_ids)}"
+        )
+
+    # ============================================================
+    # Training loop
+    # ============================================================
     for rnd in range(1, num_rounds + 1):
-        print(f"\n[Server] Round {rnd}")
+        log(INFO, "")
+        log(INFO, "=== Server Round %s / %s ===", rnd, num_rounds)
 
-        for batch in trainloader:
+        # NOTE:
+        # This implementation assumes *aligned batches*
+        # across clients and server (same sample indices).
+        for batch_idx, batch in enumerate(trainloader):
             y = batch["y"]  # shape: (output_size, B)
 
-            # ======================================================
-            # 1️⃣ Request client forward passes
-            # ======================================================
-            results = grid.run(
-                app_fn="forward",
-                message=Message(
-                    content = RecordDict({
-                        "round": MetricRecord({"round": rnd}),
-                    }),
-                    dst_node_id=0,
-                    message_type="forward",
-                ),
-            )
+            # ----------------------------------------------------
+            # 1️⃣ Request embeddings from all clients
+            # ----------------------------------------------------
+            messages = []
+            for pos, node_id in enumerate(node_ids):
+                messages.append(
+                    Message(
+                        content=RecordDict({
+                            "config": ConfigRecord({
+                                "round": rnd,
+                                "batch_idx": batch_idx,
+                                "pos": pos,
+                            }),
+                        }),
+                        message_type="query.forward",
+                        dst_node_id=node_id,
+                    )
+                )
 
-            # ======================================================
-            # 2️⃣ Collect client embeddings (by client_id)
-            # ======================================================
-            client_embeddings = {}
+            log(INFO, "Requesting embeddings from %s clients", len(messages))
+            replies = grid.send_and_receive(messages)
 
-            for client_id, reply in results:
-                client_embeddings[client_id] = reply.content["activations"]
+            # ----------------------------------------------------
+            # 2️⃣ Assemble embedding matrix H
+            # ----------------------------------------------------
+            total_dim = sum(client_embedding_dims.values())
+            batch_size = y.shape[1]
+            H = np.zeros((total_dim, batch_size))
 
-            # ======================================================
-            # 3️⃣ Concatenate embeddings in fixed order
-            # ======================================================
-            ordered_embeddings = [
-                client_embeddings[cid]
-                for cid in client_embedding_dims.keys()
-            ]
-            H = np.vstack(ordered_embeddings)
+            node_pos_map: dict[str, int] = {}
 
-            # ======================================================
-            # 4️⃣ Server forward + backward
-            # ======================================================
+            offset = 0
+            for reply in replies:
+                node_id = reply.metadata.src_node_id
+
+                arr = reply.content["arrays"]["activations"]
+                emb = arr.numpy()
+
+                pos = reply.content["config"]["pos"]
+                dim = client_embedding_dims[node_id]
+
+                H[offset : offset + dim, :] = emb
+                node_pos_map[node_id] = offset
+                offset += dim
+
+            # ----------------------------------------------------
+            # 3️⃣ Server forward + backward (NumPy)
+            # ----------------------------------------------------
             grads_w, grads_b, grad_H = server.backward(H, y)
 
-            # ---- Parameter update (simple SGD) ----
+            # ----------------------------------------------------
+            # 4️⃣ Update server parameters (SGD)
+            # ----------------------------------------------------
             for i in range(len(server.weights)):
                 server.weights[i] -= lr * grads_w[i]
                 server.biases[i] -= lr * grads_b[i]
 
-            # ======================================================
+            # ----------------------------------------------------
             # 5️⃣ Split embedding gradients per client
-            # ======================================================
-            grad_per_client = server.split_embedding_gradients(grad_H)
+            # ----------------------------------------------------
+            grad_per_client = {}
+            for node_id, start in node_pos_map.items():
+                dim = client_embedding_dims[node_id]
+                grad_per_client[node_id] = grad_H[start : start + dim, :]
 
-            # ======================================================
+            # ----------------------------------------------------
             # 6️⃣ Send gradients back to clients
-            # ======================================================
-            for cid, grad in grad_per_client.items():
-                grid.run(
-                    app_fn="backward",
-                    message=Message(
+            # ----------------------------------------------------
+            grad_messages = []
+            for node_id, grad in grad_per_client.items():
+                grad_messages.append(
+                    Message(
                         content=RecordDict({
-                            "grad": ArrayRecord({"grad": grad}),
+                            "arrays": ArrayRecord({
+                                "grad": Array(grad),
+                            }),
                         }),
-                        dst_node_id=0,
-                        message_type="backward",
-                    ),
-                    group_id=cid,
+                        message_type="train.backward",
+                        dst_node_id=node_id,
+                    )
                 )
 
-        print("[Server] Round complete")
+            log(INFO, "Sending gradients to %s clients", len(grad_messages))
+            grid.push_messages(grad_messages)
 
-    # ==========================================================
-    # 7️⃣ Save final server model
-    # ==========================================================
-    print("\n[Server] Saving final ServerDNN model...")
+        log(INFO, "Round %s complete", rnd)
+
+    # ============================================================
+    # Save final server model
+    # ============================================================
+    log(INFO, "")
+    log(INFO, "Saving final ServerDNN model...")
 
     server_state = {
         "weights": server.weights,
@@ -137,6 +190,7 @@ def main(grid: Grid, context: Context) -> None:
     }
 
     np.save("server_model.npy", server_state)
+    log(INFO, "Model saved to server_model.npy")
 
 
 

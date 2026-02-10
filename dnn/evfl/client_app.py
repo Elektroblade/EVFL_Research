@@ -1,7 +1,7 @@
 """pytorchexample: A Flower / PyTorch app."""
 
 import torch
-from flwr.app import ArrayRecord, Context, Message, MetricRecord, RecordDict
+from flwr.app import ArrayRecord, Context, Message, MetricRecord, RecordDict, ConfigRecord, Array
 from flwr.clientapp import ClientApp
 
 from evfl.dnn import (
@@ -25,21 +25,20 @@ from evfl.client_dnn import (
 # Flower ClientApp
 app = ClientApp()
 
-# ---- Global model (persistent across rounds) ----
-client_model: ClientDNN | None = None
-client_dataloader = None
+# ---- Globals ----
+_batches_per_client: dict[int, list] = {}  # partition_id -> list of batches
+# top-level global variable
+_last_batch_x_per_client: dict[int, np.ndarray] = {}
 
 
-def start_client_app(context: Context):
-    """Initialize client model and data loader"""
-    global client_model, client_dataloader, last_batch_x
 
+def _init_model_and_loader(context: Context):
+    """Initialize model and dataloader deterministically."""
     partition_id = context.node_config["partition-id"]
     num_partitions = context.node_config["num-partitions"]
     batch_size = context.run_config["batch-size"]
 
-    # ---- Initialize client model (feature-only) ----
-    client_model = ClientDNN(
+    model = ClientDNN(
         input_size=PARTITION_SIZES[partition_id],
         hidden_layers=HIDDEN_LAYERS,
         neurons_per_layer=NEURONS_PER_LAYER,
@@ -47,109 +46,109 @@ def start_client_app(context: Context):
         activation_derivative=relu_derivative
     )
 
-    # ---- Client owns only its data partition ----
-    trainloader, _ = client_model.load_data(
+    trainloader, _ = model.load_data(
         partition_id,
         num_partitions,
         batch_size,
     )
-    client_dataloader = iter(trainloader)
 
-    # Cache for backward pass alignment
-    last_batch_x = None
+    return model, list(trainloader)  # materialize for deterministic indexing
 
 
-def forward(msg: Message, context: Context):
-    global client_model, client_dataloader, last_batch_x
+# ------------------------------------------------------------------
+# 1️⃣ Forward pass: generate embeddings
+# ------------------------------------------------------------------
+@app.query("forward")
+def forward(msg: Message, context: Context) -> Message:
+    partition_id = context.node_config["partition-id"]
 
-    try:
-        batch = next(client_dataloader)
-    except StopIteration:
-        # Restart epoch deterministically
-        client_dataloader = iter(
-            client_model.load_data(
-                context.node_config["partition-id"],
-                context.node_config["num-partitions"],
-                context.run_config["batch-size"],
-            )
+    if "model" not in context.state:
+        model, batches = _init_model_and_loader(context)
+
+        # Store batches globally, keyed by partition_id
+        _batches_per_client[partition_id] = batches
+
+        # Store model weights/biases in ArrayRecord
+        array_dict = {
+            f"weights_{i}": Array(w.copy()) for i, w in enumerate(model.weights)
+        }
+        array_dict.update({
+            f"biases_{i}": Array(b.copy()) for i, b in enumerate(model.biases)
+        })
+        context.state["model"] = ArrayRecord(array_dict)
+
+    else:
+        stored = context.state["model"]
+        weights = [stored[f"weights_{i}"].numpy() for i in range(len(PARTITION_SIZES))]
+        biases = [stored[f"biases_{i}"].numpy() for i in range(len(PARTITION_SIZES))]
+
+        model = ClientDNN(
+            input_size=PARTITION_SIZES[partition_id],
+            hidden_layers=HIDDEN_LAYERS,
+            neurons_per_layer=NEURONS_PER_LAYER,
+            activation=relu,
+            activation_derivative=relu_derivative
         )
-        batch = next(client_dataloader)
+        model.weights = weights
+        model.biases = biases
 
-    X = batch["x"]   # shape: (d_client, B)
-    last_batch_x = X
+        batches = _batches_per_client[partition_id]  # retrieve global batches
 
-    # ---- Client forward pass ----
-    h = client_model.forward(X)
 
+    # ---- Deterministic batch selection ----
+    batch_idx = msg.content["config"]["batch_idx"]
+    batch = batches[batch_idx % len(batches)]
+    X = batch["x"]  # shape: (d_client, B)
+
+    # Cache for backward
+    partition_id = context.node_config["partition-id"]
+    _last_batch_x_per_client[partition_id] = X
+
+    # ---- Forward pass ----
+    h = model.forward(X)  # shape: (d_embed, B)
+
+    # Return activations in ArrayRecord
     return Message(
         content=RecordDict({
-            "activations": h
+            "arrays": ArrayRecord({
+                "activations": Array(h),
+            }),
+            "config": ConfigRecord({
+                "pos": partition_id,
+            }),
         }),
         reply_to=msg,
     )
 
 
-def backward(msg: Message, context: Context):
-    global client_model, last_batch_x
+# ------------------------------------------------------------------
+# 2️⃣ Backward pass: apply gradients
+# ------------------------------------------------------------------
+@app.train("backward")
+def backward(msg: Message, context: Context) -> Message:
+    model: ClientDNN = context.state["model"]
+    partition_id = context.node_config["partition-id"]
+    X = _last_batch_x_per_client[partition_id]
 
-    # ---- Gradient w.r.t. client embedding ----
-    grad_h = msg.content["grads"]  # shape: (h_dim, B)
+    grad_h = msg.content["arrays"]["grad"].numpy()  # (d_embed, B)
 
-    # ---- Client backward pass ----
-    grads_w, grads_b = client_model.backward(
-        last_batch_x,
-        grad_h
-    )
+    # Backward pass
+    grads_w, grads_b = model.backward(X, grad_h)
 
-    # ---- Client-side parameter update (SGD) ----
+    # SGD update
     lr = context.run_config["learning-rate"]
-    for i in range(len(client_model.weights)):
-        client_model.weights[i] -= lr * grads_w[i]
-        client_model.biases[i] -= lr * grads_b[i]
+    for i in range(len(model.weights)):
+        model.weights[i] -= lr * grads_w[i]
+        model.biases[i] -= lr * grads_b[i]
 
-    return Message(
-        content=RecordDict({}),
-        reply_to=msg,
-    )
-
-
-
-"""
-@app.evaluate()
-def evaluate(msg: Message, context: Context):
-    Evaluate the model on local data.
-
-    # Load the model and initialize it with the received weights
-    model = DNN(
-        input_size=INPUT_SIZE,
-        output_size=OUTPUT_SIZE,
-        hidden_layers=HIDDEN_LAYERS,
-        neurons_per_layer=NEURONS_PER_LAYER,
-        learning_rate=0.0,  # no training
-        activation=relu,
-        task_type=TASK_TYPE,
-    )
-    arrays_to_dnn(model, msg.content["arrays"])
-
-    # Load the data
-    partition_id = context.node_id
-    num_partitions = context.node_config["num-partitions"]
-    batch_size = context.run_config["batch-size"]
-    _, valloader = model.load_data(partition_id, num_partitions, batch_size)
-
-    # Call the evaluation function
-    preds, probs, y_true, avg_inf_ms = model.predict(valloader)
-
-    accuracy = float((preds == y_true).mean())
-
-    # Construct and return reply Message
-    metrics = {
-        "eval_acc": accuracy,
-        "avg_inference_time_ms": avg_inf_ms,
-        "num-examples": len(valloader.dataset),
+    # Persist model
+    # Store model weights/biases in ArrayRecord
+    array_dict = {
+        f"weights_{i}": Array(w.copy()) for i, w in enumerate(model.weights)
     }
-    metric_record = MetricRecord(metrics)
-    content = RecordDict({"metrics": metric_record})
-    return Message(content=content, reply_to=msg)
+    array_dict.update({
+        f"biases_{i}": Array(b.copy()) for i, b in enumerate(model.biases)
+    })
+    context.state["model"] = ArrayRecord(array_dict)
 
-"""
+    return Message(content=RecordDict(), reply_to=msg)
