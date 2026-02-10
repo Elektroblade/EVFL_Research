@@ -21,6 +21,7 @@ from evfl.dnn import (
     PARTITION_SIZES,
     TASK_TYPE,
     DATASET_DIR,
+    SEED,
     dnn_to_arrays,
     arrays_to_dnn,
     relu,
@@ -270,16 +271,14 @@ class ServerDNN:
             active_party_columns_mode="create_as_last",
         )
 
-        fds = FederatedDataset(
-            dataset=DATASET_DIR,
-            partitioners={"train": partitioner},
-        )
+        loaded_dataset = load_from_disk(DATASET_DIR)
+        partitioner.dataset = loaded_dataset["train"]
 
         # ------------------------------------------------------
         # Server loads ONLY the active party (labels)
         # Convention: server uses partition_id = -1
         # ------------------------------------------------------
-        label_partition = fds.load_partition(-1)
+        label_partition = partitioner.load_partition(-1)
 
         print("[Server] label columns:", label_partition.column_names)
 

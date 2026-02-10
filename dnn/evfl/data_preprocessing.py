@@ -77,6 +77,12 @@ def main():
         "train": hf_dataset
     })
 
+    num_columns = len(
+        [c for c in dataset_dict["train"].column_names if c != "target"]
+    )
+
+    print(num_columns)
+
     #dataset_dict["train"].info.metadata = {"min_partition_size": 2}  # or whatever number makes sense
 
     dataset_dict.save_to_disk(DATASET_DIR)

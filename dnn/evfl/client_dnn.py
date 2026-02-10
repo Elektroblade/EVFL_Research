@@ -34,6 +34,7 @@ class ClientDNN:
         self.activation_derivative = activation_derivative
         self.weights = []
         self.biases = []
+        self.has_dataset = False
 
         layer_sizes = [input_size] + [neurons_per_layer] * hidden_layers
 
@@ -113,22 +114,21 @@ class ClientDNN:
         Client sees FEATURES ONLY.
         """
 
-        if self.fds is None:
-            partitioner = VerticalSizePartitioner(
+        if self.has_dataset == False:
+            self.partitioner = VerticalSizePartitioner(
                 partition_sizes=PARTITION_SIZES,
                 active_party_columns=["target"],          # label exists
                 active_party_columns_mode="create_as_last",
             )
 
-            self.fds = FederatedDataset(
-                dataset=DATASET_DIR,
-                partitioners={"train": partitioner},
-            )
+            loaded_dataset = load_from_disk(DATASET_DIR)
+            self.partitioner.dataset = loaded_dataset["train"]
+            self.has_dataset = True
 
         # ------------------------------------------------------
         # Load THIS CLIENT'S vertical slice (features only)
         # ------------------------------------------------------
-        partition = self.fds.load_partition(partition_id)
+        partition = self.partitioner.load_partition(partition_id)
 
         print(f"[Client {partition_id}] columns:", partition.column_names)
 

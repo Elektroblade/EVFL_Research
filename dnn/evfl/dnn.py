@@ -26,7 +26,7 @@ DROP_COLS = [
     "Timestamp"
 ]
 DATASET_DIR = "datasets/insdn_hf_dataset"
-PARTITION_SIZES = [26, 26, 25]
+PARTITION_SIZES = [27, 26, 26]
 
 class DNN:
     def __init__(self, input_size, output_size, hidden_layers, neurons_per_layer, learning_rate, activation, task_type="multiclass"):
