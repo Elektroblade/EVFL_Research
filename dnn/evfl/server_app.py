@@ -48,6 +48,9 @@ def main(grid: Grid, context: Context) -> None:
         f"client_{i}": dim for i, dim in enumerate(PARTITION_SIZES)
     }
 
+    partition_id = msg.metadata["partition_id"]
+    dim = client_embedding_dims[partition_id]
+
     # ------------------------------------------------------------
     # Server-side DNN head (NumPy)
     # ------------------------------------------------------------
@@ -67,7 +70,7 @@ def main(grid: Grid, context: Context) -> None:
     # ------------------------------------------------------------
     trainloader, _ = server.load_centralized_labels(batch_size=batch_size)
 
-    node_ids = list(grid.get_node_ids())
+    node_ids = list(grid.get_node_ids()) # TODO this causes problems
     log(INFO, "Connected clients: %s", node_ids)
 
     if len(node_ids) != len(client_embedding_dims):

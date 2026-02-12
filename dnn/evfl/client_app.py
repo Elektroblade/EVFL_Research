@@ -29,7 +29,8 @@ app = ClientApp()
 # ---- Globals ----
 _batches_per_client: dict[int, list] = {}  # partition_id -> list of batches
 # top-level global variable
-_last_batch_x_per_client: dict[int, np.ndarray] = {}
+_last_batch_x = {}
+_client_data = {}
 
 
 
@@ -47,13 +48,13 @@ def _init_model_and_loader(context: Context):
         activation_derivative=relu_derivative
     )
 
-    trainloader, _ = model.load_data(
+    X_train, _ = model.load_data(
         partition_id,
         num_partitions,
         batch_size,
     )
 
-    return model, trainloader  # materialize for deterministic indexing
+    return model, X_train  # materialize for deterministic indexing
 
 def get_batch(loader, batch_idx):
     num_batches = len(loader)  # safe for PyTorch DataLoader
@@ -71,53 +72,85 @@ def get_batch(loader, batch_idx):
 @app.query("forward")
 def forward(msg: Message, context: Context) -> Message:
     partition_id = context.node_config["partition-id"]
+    batch_size = context.run_config["batch-size"]
+    batch_idx = msg.content["config"]["batch_idx"]
 
+    # --------------------------------------------------
+    # First-time initialization
+    # --------------------------------------------------
     if "model" not in context.state:
-        model, trainloader = _init_model_and_loader(context)
-        _batches_per_client[partition_id] = trainloader
 
-        # Store model weights/biases in ArrayRecord
+        model, X_train = _init_model_and_loader(context)
+
+        # Store dataset directly in state (no globals)
+        _client_data[partition_id] = X_train
+
+        # Store model parameters
         array_dict = {
-            f"weights_{i}": Array(w.copy()) for i, w in enumerate(model.weights)
+            f"weights_{i}": Array(w.copy())
+            for i, w in enumerate(model.weights)
         }
         array_dict.update({
-            f"biases_{i}": Array(b.copy()) for i, b in enumerate(model.biases)
+            f"biases_{i}": Array(b.copy())
+            for i, b in enumerate(model.biases)
         })
+
         context.state["model"] = ArrayRecord(array_dict)
 
-    else:
-        stored = context.state["model"]
-        weights = [stored[f"weights_{i}"].numpy() for i in range(len(PARTITION_SIZES))]
-        biases = [stored[f"biases_{i}"].numpy() for i in range(len(PARTITION_SIZES))]
+    # --------------------------------------------------
+    # Restore model from state
+    # --------------------------------------------------
+    stored = context.state["model"]
 
-        model = ClientDNN(
-            input_size=PARTITION_SIZES[partition_id],
-            hidden_layers=HIDDEN_LAYERS,
-            neurons_per_layer=NEURONS_PER_LAYER,
-            activation=relu,
-            activation_derivative=relu_derivative
-        )
-        model.weights = weights
-        model.biases = biases
+    num_layers = len([k for k in stored.keys() if "weights_" in k])
 
-        trainloader = _batches_per_client[partition_id]  # retrieve global batches
+    weights = [
+        stored[f"weights_{i}"].numpy()
+        for i in range(num_layers)
+    ]
+    biases = [
+        stored[f"biases_{i}"].numpy()
+        for i in range(num_layers)
+    ]
 
+    model = ClientDNN(
+        input_size=PARTITION_SIZES[partition_id],
+        hidden_layers=HIDDEN_LAYERS,
+        neurons_per_layer=NEURONS_PER_LAYER,
+        activation=relu,
+        activation_derivative=relu_derivative
+    )
 
-    # ---- Deterministic batch selection ----
-    batch_idx = msg.content["config"]["batch_idx"]
-    num_batches = len(trainloader)  # This works if DataLoader has __len__()
+    model.weights = weights
+    model.biases = biases
+
+    # --------------------------------------------------
+    # Deterministic batch slicing
+    # --------------------------------------------------
+    X_train = _client_data[partition_id]
+
+    num_samples = X_train.shape[0]
+    num_batches = (num_samples + batch_size - 1) // batch_size
+
     effective_idx = batch_idx % num_batches
-    batch = get_batch(trainloader, batch_idx)
-    X = batch["x"]  # shape: (d_client, B)
 
-    # Cache for backward
-    partition_id = context.node_config["partition-id"]
-    _last_batch_x_per_client[partition_id] = X
+    start = effective_idx * batch_size
+    end = min(start + batch_size, num_samples)
 
-    # ---- Forward pass ----
-    h = model.forward(X)  # shape: (d_embed, B)
+    # Slice rows (samples)
+    X_batch = X_train[start:end]
 
-    # Return activations in ArrayRecord
+    # Transpose to (features, batch_size)
+    X_batch = X_batch.T
+
+    # Cache for backward pass
+    _last_batch_x[partition_id] = X_batch
+
+    # --------------------------------------------------
+    # Forward pass
+    # --------------------------------------------------
+    h = model.forward(X_batch)
+
     return Message(
         content=RecordDict({
             "arrays": ArrayRecord({
@@ -128,6 +161,7 @@ def forward(msg: Message, context: Context) -> Message:
             }),
         }),
         reply_to=msg,
+        metadata={"partition_id": partition_id}
     )
 
 
@@ -138,7 +172,7 @@ def forward(msg: Message, context: Context) -> Message:
 def backward(msg: Message, context: Context) -> Message:
     model: ClientDNN = context.state["model"]
     partition_id = context.node_config["partition-id"]
-    X = _last_batch_x_per_client[partition_id]
+    X = _last_batch_x[partition_id]
 
     grad_h = msg.content["arrays"]["grad"].numpy()  # (d_embed, B)
 
@@ -161,4 +195,4 @@ def backward(msg: Message, context: Context) -> Message:
     })
     context.state["model"] = ArrayRecord(array_dict)
 
-    return Message(content=RecordDict(), reply_to=msg)
+    return Message(content=RecordDict(), reply_to=msg, metadata={"partition_id": partition_id})

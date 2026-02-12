@@ -148,37 +148,33 @@ class ClientDNN:
         )
 
         # ---- Apply preprocessing (normalization, etc.) ----
-        partition = partition.with_transform(self.apply_transforms_no_labels)
+        #partition = partition.with_transform(self.apply_transforms_no_labels)
 
         g = torch.Generator().manual_seed(SEED)
 
-        trainloader = DataLoader(
-            partition["train"],
-            batch_size=batch_size,
-            shuffle=False,
-            generator=g,
-        )
+        train_dataset = partition["train"]
+        test_dataset = partition["test"]
 
-        testloader = DataLoader(
-            partition["test"],
-            batch_size=batch_size,
-            shuffle=False,
-        )
+        train_cols = train_dataset.column_names
+        test_cols = test_dataset.column_names
 
-        # ------------------------------------------------------
-        # Wrap loaders to emit NumPy batches
-        # ------------------------------------------------------
-        def numpy_batch_generator(dataloader):
-            for batch in dataloader:
-                # batch is dict[column -> tensor]
-                X = torch.stack(
-                    [batch[col] for col in batch.keys()],
-                    dim=0
-                ).numpy()
+        # Convert once to NumPy arrays (features only)
+        X_train = np.stack(
+            [
+                np.array(train_dataset[col])
+                for col in train_cols
+            ],
+            axis=1
+        ).astype(np.float32)
+        X_test = np.stack(
+            [
+                np.array(test_dataset[col])
+                for col in test_cols
+            ],
+            axis=1
+        ).astype(np.float32)
 
-                yield {"x": X}
-
-        return numpy_batch_generator(trainloader), numpy_batch_generator(testloader)
+        return X_train, X_test
 
     
     def apply_transforms_no_labels(self, batch):
