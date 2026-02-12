@@ -3,6 +3,7 @@
 import torch
 from flwr.app import ArrayRecord, Context, Message, MetricRecord, RecordDict, ConfigRecord, Array
 from flwr.clientapp import ClientApp
+import numpy as np
 
 from evfl.dnn import (
     DNN,
@@ -52,8 +53,17 @@ def _init_model_and_loader(context: Context):
         batch_size,
     )
 
-    return model, list(trainloader)  # materialize for deterministic indexing
+    return model, trainloader  # materialize for deterministic indexing
 
+def get_batch(loader, batch_idx):
+    num_batches = len(loader)  # safe for PyTorch DataLoader
+    effective_idx = batch_idx % num_batches
+
+    for i, batch in enumerate(loader):
+        if i == effective_idx:
+            return batch
+
+    raise IndexError("Batch index out of range")
 
 # ------------------------------------------------------------------
 # 1️⃣ Forward pass: generate embeddings
@@ -63,10 +73,8 @@ def forward(msg: Message, context: Context) -> Message:
     partition_id = context.node_config["partition-id"]
 
     if "model" not in context.state:
-        model, batches = _init_model_and_loader(context)
-
-        # Store batches globally, keyed by partition_id
-        _batches_per_client[partition_id] = batches
+        model, trainloader = _init_model_and_loader(context)
+        _batches_per_client[partition_id] = trainloader
 
         # Store model weights/biases in ArrayRecord
         array_dict = {
@@ -92,12 +100,14 @@ def forward(msg: Message, context: Context) -> Message:
         model.weights = weights
         model.biases = biases
 
-        batches = _batches_per_client[partition_id]  # retrieve global batches
+        trainloader = _batches_per_client[partition_id]  # retrieve global batches
 
 
     # ---- Deterministic batch selection ----
     batch_idx = msg.content["config"]["batch_idx"]
-    batch = batches[batch_idx % len(batches)]
+    num_batches = len(trainloader)  # This works if DataLoader has __len__()
+    effective_idx = batch_idx % num_batches
+    batch = get_batch(trainloader, batch_idx)
     X = batch["x"]  # shape: (d_client, B)
 
     # Cache for backward

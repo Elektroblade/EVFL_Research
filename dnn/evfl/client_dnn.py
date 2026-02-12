@@ -155,7 +155,7 @@ class ClientDNN:
         trainloader = DataLoader(
             partition["train"],
             batch_size=batch_size,
-            shuffle=True,
+            shuffle=False,
             generator=g,
         )
 
