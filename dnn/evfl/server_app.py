@@ -93,6 +93,10 @@ def main(grid: Grid, context: Context) -> None:
         # across clients and server (same sample indices).
         for batch_idx, batch in enumerate(trainloader):
             y = batch["y"]  # shape: (output_size, B)
+            total_number_of_samples = len(trainloader.dataset)
+            batch_size = y.shape[1]
+            processed = batch_idx * batch_size
+            print(f"eps: {rnd}, bi: {batch_idx}, processed: {processed} / {total_number_of_samples} samples")
 
             # ----------------------------------------------------
             # 1️⃣ Request embeddings from all clients

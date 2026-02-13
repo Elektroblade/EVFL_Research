@@ -131,7 +131,7 @@ class ClientDNN:
         # ------------------------------------------------------
         partition = self.partitioner.load_partition(partition_id)
 
-        print(f"[Client {partition_id}] columns:", partition.column_names)
+        #print(f"[Client {partition_id}] columns:", partition.column_names)
 
         # ---- Drop label if present (safety) ----
         if "target" in partition.column_names:

@@ -50,7 +50,7 @@ def _init_model_and_loader(context: Context):
         batch_size,
     )
 
-    print("X_train type during init:", type(X_train))
+    #print("X_train type during init:", type(X_train))
 
     return model, X_train  # materialize for deterministic indexing
 
@@ -145,7 +145,7 @@ def forward(msg: Message, context: Context) -> Message:
     # --------------------------------------------------
     h = model.forward(X_batch)
 
-    print("Client embedding shape after forward:", h.shape)
+    #print("Client embedding shape after forward:", h.shape)
 
     return Message(
         content=RecordDict({
@@ -172,7 +172,7 @@ def backward(msg: Message, context: Context) -> Message:
     # 1️⃣ Reload dataset
     model, X_train = _init_model_and_loader(context)
 
-    print("X_train type during backward:", type(X_train))
+    #print("X_train type during backward:", type(X_train))
 
     # 2️⃣ Deterministic batch slicing (same as forward)
     num_samples = X_train.shape[0]
