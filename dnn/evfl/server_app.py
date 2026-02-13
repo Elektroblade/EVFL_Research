@@ -45,6 +45,7 @@ from evfl.dnn import (
 from evfl.server_dnn import (
     ServerDNN
 )
+RAY_ACCEL_ENV_VAR_OVERRIDE_ON_ZERO=0
 
 # ---------------------------------------------------------------------
 # Create ServerApp
@@ -155,7 +156,7 @@ def train(grid, context, num_rounds, lr, embedding_dim, num_clients,
 
             effective_batch_size = y.shape[1]
             processed = min((batch_idx) * global_batch_size, total_number_of_samples)
-            print(f"eps: {rnd}, bi: {batch_idx}, processed: {processed} / {total_number_of_samples} samples")
+            log(INFO, f"eps: {rnd}, bi: {batch_idx}, processed: {processed} / {total_number_of_samples} samples")
 
             # 1 Request embeddings from all clients
             start = batch_idx * global_batch_size

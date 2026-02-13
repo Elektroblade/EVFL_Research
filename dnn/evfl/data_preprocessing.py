@@ -23,10 +23,34 @@ DROP_COLS = [
     "Flow ID",
     "Src IP",
     "Dst IP",
-    "Timestamp"
+    "Timestamp",
+    "Src Port", 
+    "Dst Port"
 ]
 DATASET_DIR = "datasets/insdn_hf_dataset"
 target_column: str = "Label"
+
+def normalize_features(df, target_col):
+    df = df.copy()
+
+    # Select numeric columns only
+    numeric_cols = df.select_dtypes(include=["number"]).columns.tolist()
+
+    # Remove target column if present
+    if target_col in numeric_cols:
+        numeric_cols.remove(target_col)
+
+    # Standardize: (x - mean) / std
+    for col in numeric_cols:
+        mean = df[col].mean()
+        std = df[col].std()
+
+        if std > 0:
+            df[col] = (df[col] - mean) / std
+        else:
+            df[col] = 0.0  # constant column
+
+    return df
 
 def main():
     THIS_DIR = Path(__file__).resolve().parent
@@ -69,6 +93,9 @@ def main():
     print(list(columns_without_labels))
 
     print(f"Labels: {insdn_data_df["target"].unique()}")
+
+    # Normalize full df
+    insdn_data_df = normalize_features(insdn_data_df, target_column)
 
     hf_dataset = Dataset.from_pandas(insdn_data_df)
     hf_dataset = hf_dataset.remove_columns(

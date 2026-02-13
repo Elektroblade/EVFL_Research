@@ -70,11 +70,14 @@ class ServerDNN:
         self.biases = []
 
         for i in range(len(layer_sizes) - 1):
+            fan_in = layer_sizes[i]
+
             self.weights.append(
-                np.random.randn(layer_sizes[i+1], layer_sizes[i])
+                np.random.randn(layer_sizes[i+1], layer_sizes[i]) * np.sqrt(2.0 / fan_in)
             )
+
             self.biases.append(
-                np.random.randn(layer_sizes[i+1], 1)
+                np.zeros((layer_sizes[i+1], 1))
             )
 
     def forward(self, embeddings):
@@ -100,8 +103,20 @@ class ServerDNN:
         preds, activations, weighted_sums = self.forward(embeddings)
 
         # ----- Output layer delta -----
-        if self.task_type in ["binary", "multiclass"]:
+        if self.task_type == "multiclass":
+            batch_size = y.shape[1]
+            num_classes = preds.shape[0]
+
+            y = y.astype(int)
+
+            y_onehot = np.zeros((num_classes, batch_size))
+            y_onehot[y.flatten(), np.arange(batch_size)] = 1
+
+            delta = preds - y_onehot
+
+        elif self.task_type == "binary":
             delta = preds - y
+
         else:
             delta = preds - y
 

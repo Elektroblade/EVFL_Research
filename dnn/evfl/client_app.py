@@ -23,6 +23,8 @@ from evfl.client_dnn import (
     ClientDNN
 )
 
+RAY_ACCEL_ENV_VAR_OVERRIDE_ON_ZERO=0
+
 # Flower ClientApp
 app = ClientApp()
 

@@ -40,11 +40,14 @@ class ClientDNN:
         layer_sizes = [input_size] + [neurons_per_layer] * hidden_layers
 
         for i in range(len(layer_sizes) - 1):
+            fan_in = layer_sizes[i]
+
             self.weights.append(
-                np.random.randn(layer_sizes[i+1], layer_sizes[i])
+                np.random.randn(layer_sizes[i+1], layer_sizes[i]) * np.sqrt(2.0 / fan_in)
             )
+
             self.biases.append(
-                np.random.randn(layer_sizes[i+1], 1)
+                np.zeros((layer_sizes[i+1], 1))
             )
 
     def forward(self, x):
@@ -83,7 +86,7 @@ class ClientDNN:
             activations.append(a)
 
         # ---- Backward pass starts from server gradient ----
-        delta = grad_from_server * self.activation_derivative(weighted_sums[-1])
+        delta = (grad_from_server / batch_size) * self.activation_derivative(weighted_sums[-1])
 
         gradients_w = [np.zeros_like(w) for w in self.weights]
         gradients_b = [np.zeros_like(b) for b in self.biases]

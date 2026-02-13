@@ -2,28 +2,20 @@
   "citation": "",
   "description": "",
   "features": {
-    "Src Port": {
-      "dtype": "int64",
-      "_type": "Value"
-    },
-    "Dst Port": {
-      "dtype": "int64",
-      "_type": "Value"
-    },
     "Protocol": {
-      "dtype": "int64",
+      "dtype": "float64",
       "_type": "Value"
     },
     "Flow Duration": {
-      "dtype": "int64",
+      "dtype": "float64",
       "_type": "Value"
     },
     "Tot Fwd Pkts": {
-      "dtype": "int64",
+      "dtype": "float64",
       "_type": "Value"
     },
     "Tot Bwd Pkts": {
-      "dtype": "int64",
+      "dtype": "float64",
       "_type": "Value"
     },
     "TotLen Fwd Pkts": {
@@ -35,11 +27,11 @@
       "_type": "Value"
     },
     "Fwd Pkt Len Max": {
-      "dtype": "int64",
+      "dtype": "float64",
       "_type": "Value"
     },
     "Fwd Pkt Len Min": {
-      "dtype": "int64",
+      "dtype": "float64",
       "_type": "Value"
     },
     "Fwd Pkt Len Mean": {
@@ -51,11 +43,11 @@
       "_type": "Value"
     },
     "Bwd Pkt Len Max": {
-      "dtype": "int64",
+      "dtype": "float64",
       "_type": "Value"
     },
     "Bwd Pkt Len Min": {
-      "dtype": "int64",
+      "dtype": "float64",
       "_type": "Value"
     },
     "Bwd Pkt Len Mean": {
@@ -131,27 +123,27 @@
       "_type": "Value"
     },
     "Fwd PSH Flags": {
-      "dtype": "int64",
+      "dtype": "float64",
       "_type": "Value"
     },
     "Bwd PSH Flags": {
-      "dtype": "int64",
+      "dtype": "float64",
       "_type": "Value"
     },
     "Fwd URG Flags": {
-      "dtype": "int64",
+      "dtype": "float64",
       "_type": "Value"
     },
     "Bwd URG Flags": {
-      "dtype": "int64",
+      "dtype": "float64",
       "_type": "Value"
     },
     "Fwd Header Len": {
-      "dtype": "int64",
+      "dtype": "float64",
       "_type": "Value"
     },
     "Bwd Header Len": {
-      "dtype": "int64",
+      "dtype": "float64",
       "_type": "Value"
     },
     "Fwd Pkts/s": {
@@ -163,11 +155,11 @@
       "_type": "Value"
     },
     "Pkt Len Min": {
-      "dtype": "int64",
+      "dtype": "float64",
       "_type": "Value"
     },
     "Pkt Len Max": {
-      "dtype": "int64",
+      "dtype": "float64",
       "_type": "Value"
     },
     "Pkt Len Mean": {
@@ -183,39 +175,39 @@
       "_type": "Value"
     },
     "FIN Flag Cnt": {
-      "dtype": "int64",
+      "dtype": "float64",
       "_type": "Value"
     },
     "SYN Flag Cnt": {
-      "dtype": "int64",
+      "dtype": "float64",
       "_type": "Value"
     },
     "RST Flag Cnt": {
-      "dtype": "int64",
+      "dtype": "float64",
       "_type": "Value"
     },
     "PSH Flag Cnt": {
-      "dtype": "int64",
+      "dtype": "float64",
       "_type": "Value"
     },
     "ACK Flag Cnt": {
-      "dtype": "int64",
+      "dtype": "float64",
       "_type": "Value"
     },
     "URG Flag Cnt": {
-      "dtype": "int64",
+      "dtype": "float64",
       "_type": "Value"
     },
     "CWE Flag Count": {
-      "dtype": "int64",
+      "dtype": "float64",
       "_type": "Value"
     },
     "ECE Flag Cnt": {
-      "dtype": "int64",
+      "dtype": "float64",
       "_type": "Value"
     },
     "Down/Up Ratio": {
-      "dtype": "int64",
+      "dtype": "float64",
       "_type": "Value"
     },
     "Pkt Size Avg": {
@@ -231,59 +223,59 @@
       "_type": "Value"
     },
     "Fwd Byts/b Avg": {
-      "dtype": "int64",
+      "dtype": "float64",
       "_type": "Value"
     },
     "Fwd Pkts/b Avg": {
-      "dtype": "int64",
+      "dtype": "float64",
       "_type": "Value"
     },
     "Fwd Blk Rate Avg": {
-      "dtype": "int64",
+      "dtype": "float64",
       "_type": "Value"
     },
     "Bwd Byts/b Avg": {
-      "dtype": "int64",
+      "dtype": "float64",
       "_type": "Value"
     },
     "Bwd Pkts/b Avg": {
-      "dtype": "int64",
+      "dtype": "float64",
       "_type": "Value"
     },
     "Bwd Blk Rate Avg": {
-      "dtype": "int64",
+      "dtype": "float64",
       "_type": "Value"
     },
     "Subflow Fwd Pkts": {
-      "dtype": "int64",
+      "dtype": "float64",
       "_type": "Value"
     },
     "Subflow Fwd Byts": {
-      "dtype": "int64",
+      "dtype": "float64",
       "_type": "Value"
     },
     "Subflow Bwd Pkts": {
-      "dtype": "int64",
+      "dtype": "float64",
       "_type": "Value"
     },
     "Subflow Bwd Byts": {
-      "dtype": "int64",
+      "dtype": "float64",
       "_type": "Value"
     },
     "Init Fwd Win Byts": {
-      "dtype": "int64",
+      "dtype": "float64",
       "_type": "Value"
     },
     "Init Bwd Win Byts": {
-      "dtype": "int64",
+      "dtype": "float64",
       "_type": "Value"
     },
     "Fwd Act Data Pkts": {
-      "dtype": "int64",
+      "dtype": "float64",
       "_type": "Value"
     },
     "Fwd Seg Size Min": {
-      "dtype": "int64",
+      "dtype": "float64",
       "_type": "Value"
     },
     "Active Mean": {
