@@ -13,9 +13,9 @@ from torch.utils.data import DataLoader
 from datasets import load_from_disk
 
 INPUT_SIZE = 79
-OUTPUT_SIZE = 3
+OUTPUT_SIZE = 8
 HIDDEN_LAYERS = 2
-NEURONS_PER_LAYER = 64
+NEURONS_PER_LAYER = 32
 TASK_TYPE = "multiclass"
 SEED = 42
 BATCH_SIZE = 32

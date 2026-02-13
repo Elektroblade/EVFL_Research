@@ -109,6 +109,7 @@ class ClientDNN:
         partition_id: int,
         num_partitions: int,
         batch_size: int,
+        subset_size: int
     ):
         """
         Load vertically-partitioned NIDS data for a VFL client.
@@ -151,6 +152,13 @@ class ClientDNN:
         #partition = partition.with_transform(self.apply_transforms_no_labels)
 
         g = torch.Generator().manual_seed(SEED)
+
+        if 0 < subset_size < len(partition["train"]):
+            train_dataset = partition["train"].select(range(subset_size))
+            test_dataset = partition["test"].select(range(subset_size))
+        else:
+            train_dataset = partition["train"]
+            test_dataset = partition["test"]
 
         train_dataset = partition["train"]
         test_dataset = partition["test"]

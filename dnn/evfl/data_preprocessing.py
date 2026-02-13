@@ -68,6 +68,8 @@ def main():
     print("Columns in the dataset (excluding 'Label' and 'Target Type'):")
     print(list(columns_without_labels))
 
+    print(f"Labels: {insdn_data_df["target"].unique()}")
+
     hf_dataset = Dataset.from_pandas(insdn_data_df)
     hf_dataset = hf_dataset.remove_columns(
         [c for c in ["Label", "Target Type"]]

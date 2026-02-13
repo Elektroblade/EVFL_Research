@@ -30,11 +30,10 @@ app = ClientApp()
 
 
 
-def _init_model_and_loader(context: Context):
+def _init_model(context: Context):
     """Initialize model and dataloader deterministically."""
     partition_id = context.node_config["partition-id"]
     num_partitions = context.node_config["num-partitions"]
-    batch_size = context.run_config["batch-size"]
 
     model = ClientDNN(
         input_size=PARTITION_SIZES[partition_id],
@@ -44,15 +43,22 @@ def _init_model_and_loader(context: Context):
         activation_derivative=relu_derivative
     )
 
+    return model
+
+def load_data(context: Context, model):
+    partition_id = context.node_config["partition-id"]
+    num_partitions = context.node_config["num-partitions"]
+    global_batch_size = context.run_config["batch-size"]
+    subset_size = context.run_config["subset"]
+
     X_train, _ = model.load_data(
         partition_id,
         num_partitions,
-        batch_size,
+        global_batch_size,
+        subset_size
     )
 
-    #print("X_train type during init:", type(X_train))
-
-    return model, X_train  # materialize for deterministic indexing
+    return X_train  # materialize for deterministic indexing
 
 def get_batch(loader, batch_idx):
     num_batches = len(loader)  # safe for PyTorch DataLoader
@@ -70,7 +76,8 @@ def get_batch(loader, batch_idx):
 @app.query("forward")
 def forward(msg: Message, context: Context) -> Message:
     partition_id = context.node_config["partition-id"]
-    batch_size = context.run_config["batch-size"]
+    effective_batch_size = msg.content["config"]["effective_batch_size"]
+    global_batch_size = msg.content["config"]["global_batch_size"]
     batch_idx = msg.content["config"]["batch_idx"]
     node_id = context
 
@@ -79,7 +86,7 @@ def forward(msg: Message, context: Context) -> Message:
     # --------------------------------------------------
     if "model" not in context.state:
 
-        model, X_train = _init_model_and_loader(context)
+        model = _init_model(context)
 
         # Store model parameters
         array_dict = {
@@ -92,8 +99,6 @@ def forward(msg: Message, context: Context) -> Message:
         })
 
         context.state["model"] = ArrayRecord(array_dict)
-    else:
-        _, X_train = _init_model_and_loader(context)
 
     # --------------------------------------------------
     # Restore model from state
@@ -122,17 +127,19 @@ def forward(msg: Message, context: Context) -> Message:
     model.weights = weights
     model.biases = biases
 
+    X_train = load_data(context, model)
+
     # --------------------------------------------------
     # Deterministic batch slicing
     # --------------------------------------------------
 
     num_samples = X_train.shape[0]
-    num_batches = (num_samples + batch_size - 1) // batch_size
+    num_batches = (num_samples + global_batch_size - 1) // global_batch_size
 
     effective_idx = batch_idx % num_batches
 
-    start = effective_idx * batch_size
-    end = min(start + batch_size, num_samples)
+    start = effective_idx * global_batch_size
+    end = min(start + effective_batch_size, num_samples)
 
     # Slice rows (samples)
     X_batch = X_train[start:end]
@@ -145,7 +152,7 @@ def forward(msg: Message, context: Context) -> Message:
     # --------------------------------------------------
     h = model.forward(X_batch)
 
-    #print("Client embedding shape after forward:", h.shape)
+    print("Client embedding shape after forward:", h.shape)
 
     return Message(
         content=RecordDict({
@@ -165,22 +172,31 @@ def forward(msg: Message, context: Context) -> Message:
 # ------------------------------------------------------------------
 @app.train("backward")
 def backward(msg: Message, context: Context) -> Message:
+    mode = msg.content["config"]["mode"]
+    if mode == -1:
+        # Ignore backward during testing
+        return Message(
+            content=RecordDict({}),
+            reply_to=msg
+        )
     partition_id = context.node_config["partition-id"]
-    batch_size = context.run_config["batch-size"]
+    effective_batch_size = msg.content["config"]["effective_batch_size"]
+    global_batch_size = msg.content["config"]["global_batch_size"]
     batch_idx = msg.content["config"]["batch_idx"]  # must be sent from server
 
     # 1️⃣ Reload dataset
-    model, X_train = _init_model_and_loader(context)
+    model = _init_model(context)
+    X_train = load_data(context, model)
 
     #print("X_train type during backward:", type(X_train))
 
     # 2️⃣ Deterministic batch slicing (same as forward)
     num_samples = X_train.shape[0]
-    num_batches = (num_samples + batch_size - 1) // batch_size
+    num_batches = (num_samples + global_batch_size - 1) // global_batch_size
     effective_idx = batch_idx % num_batches
 
-    start = effective_idx * batch_size
-    end = min(start + batch_size, num_samples)
+    start = effective_idx * global_batch_size
+    end = min(start + effective_batch_size, num_samples)
 
     X_batch = X_train[start:end].T
 
@@ -199,6 +215,8 @@ def backward(msg: Message, context: Context) -> Message:
 
     # 5️⃣ Get gradient from server
     grad_h = msg.content["arrays"]["grad"].numpy()
+
+    print("grad_h.shape:", grad_h.shape, "h.shape:", h.shape)
 
     # Safety check
     assert grad_h.shape == h.shape

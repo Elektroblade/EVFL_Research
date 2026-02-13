@@ -251,6 +251,7 @@ class ServerDNN:
     def load_centralized_labels(
         self,
         batch_size: int = None,
+        subset_size: int = -1
     ):
         """
         Load centralized labels for VFL server.
@@ -289,43 +290,35 @@ class ServerDNN:
             seed=SEED,
         )
 
+                # Determine subset
+        if 0 < subset_size < len(label_partition["train"]):
+            train_labels = label_partition["train"].select(range(subset_size))
+            test_labels = label_partition["test"].select(range(subset_size))
+        else:
+            train_labels = label_partition["train"]
+            test_labels = label_partition["test"]
+
+        train_cols = train_labels.column_names
+        test_cols = train_labels.column_names
+
         g = torch.Generator().manual_seed(SEED)
 
-        trainloader = DataLoader(
-            label_partition["train"],
-            batch_size=batch_size,
-            shuffle=True,
-            generator=g,
-        )
+        # Convert once to NumPy arrays (labels only)
+        # assuming label column is 'y'
+        y_train = np.array(train_labels["target"]).reshape(1, -1).astype(np.float32)  # shape (output_size, N)
+        y_test = np.array(test_labels["target"]).reshape(1, -1).astype(np.float32)
 
-        testloader = DataLoader(
-            label_partition["test"],
-            batch_size=batch_size,
-            shuffle=False,
-        )
+        # Optionally, split into batches manually for server-side iteration
+        num_samples = y_train.shape[1]
+        num_batches = (num_samples + batch_size - 1) // batch_size
 
-        # ------------------------------------------------------
-        # Convert Torch batches → NumPy
-        # ------------------------------------------------------
-        def numpy_label_generator(dataloader):
-            for batch in dataloader:
-                y = batch["target"]
+        def batch_generator(y_data):
+            for i in range(num_batches):
+                start = i * batch_size
+                end = min(start + batch_size, num_samples)
+                yield {"y": y_data[:, start:end]}
 
-                # ---- Convert to NumPy ----
-                if isinstance(y, torch.Tensor):
-                    y = y.numpy()
-
-                # ---- Shape normalization ----
-                # Binary: (B,) → (1, B)
-                if y.ndim == 1:
-                    y = y.reshape(1, -1)
-
-                # Multiclass one-hot assumed:
-                # y shape already (num_classes, B)
-
-                yield {"y": y}
-
-        return numpy_label_generator(trainloader), numpy_label_generator(testloader)
+        return batch_generator(y_train), batch_generator(y_test), num_samples
     
     def apply_transforms(self, batch):
         """
