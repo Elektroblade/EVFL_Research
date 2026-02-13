@@ -149,9 +149,9 @@ def train(grid, context, num_rounds, lr, embedding_dim, num_clients,
     # ============================================================
     # Training loop
     # ============================================================
-    log(INFO, "====================")
+    #log(INFO, "====================")
     log(INFO, "STARTING TRAINING")
-    log(INFO, "====================")
+    #log(INFO, "====================")
     for rnd in range(1, num_rounds + 1):
         log(INFO, "")
         log(INFO, "=== Server Round %s / %s ===", rnd, num_rounds)
@@ -162,8 +162,8 @@ def train(grid, context, num_rounds, lr, embedding_dim, num_clients,
         for batch_idx, batch in enumerate(trainloader):
             y = batch["y"]  # shape: (output_size, B)
 
-            print("Server train y shape:", y.shape)
-            print("Server train Unique y values:", np.unique(y))
+            #print("Server train y shape:", y.shape)
+            #print("Server train Unique y values:", np.unique(y))
 
             effective_batch_size = y.shape[1]
             processed = min((batch_idx) * global_batch_size, total_number_of_samples)

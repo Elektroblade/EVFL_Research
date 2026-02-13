@@ -152,7 +152,7 @@ def forward(msg: Message, context: Context) -> Message:
     # --------------------------------------------------
     h = model.forward(X_batch)
 
-    print("Client embedding shape after forward:", h.shape)
+    #print("Client embedding shape after forward:", h.shape)
 
     return Message(
         content=RecordDict({
@@ -216,7 +216,7 @@ def backward(msg: Message, context: Context) -> Message:
     # 5️⃣ Get gradient from server
     grad_h = msg.content["arrays"]["grad"].numpy()
 
-    print("grad_h.shape:", grad_h.shape, "h.shape:", h.shape)
+    #print("grad_h.shape:", grad_h.shape, "h.shape:", h.shape)
 
     # Safety check
     assert grad_h.shape == h.shape
