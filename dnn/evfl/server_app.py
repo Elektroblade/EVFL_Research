@@ -54,23 +54,17 @@ app = ServerApp()
 
 @app.main()
 def main(grid: Grid, context: Context) -> None:
-    # ------------------------------------------------------------
     # Run config
-    # ------------------------------------------------------------
     num_rounds: int = context.run_config["num-server-rounds"]
     lr: float = context.run_config["learning-rate"]
     global_batch_size: int = context.run_config["batch-size"]
     subset_size: int = context.run_config["subset"]
 
-    # ------------------------------------------------------------
     # Client embedding dimensions (fixed & known)
-    # ------------------------------------------------------------
     embedding_dim = NEURONS_PER_LAYER
     num_clients = len(PARTITION_SIZES)
 
-    # ------------------------------------------------------------
     # Server-side DNN head (NumPy)
-    # ------------------------------------------------------------
     server = ServerDNN(
         num_clients=num_clients,
         embedding_dim=embedding_dim,
@@ -107,9 +101,7 @@ def main(grid: Grid, context: Context) -> None:
     server = train(grid, context, num_rounds, lr, embedding_dim, num_clients,
           server, trainloader, total_number_of_samples, node_ids, global_batch_size)
 
-    # ============================================================
     # Save final server model
-    # ============================================================
     log(INFO, "")
     log(INFO, "Saving final ServerDNN model...")
 
@@ -146,12 +138,8 @@ def main(grid: Grid, context: Context) -> None:
 
 def train(grid, context, num_rounds, lr, embedding_dim, num_clients,
           server, trainloader, total_number_of_samples, node_ids, global_batch_size):
-    # ============================================================
     # Training loop
-    # ============================================================
-    #log(INFO, "====================")
     log(INFO, "STARTING TRAINING")
-    #log(INFO, "====================")
     for rnd in range(1, num_rounds + 1):
         log(INFO, "")
         log(INFO, "=== Server Round %s / %s ===", rnd, num_rounds)
@@ -169,9 +157,7 @@ def train(grid, context, num_rounds, lr, embedding_dim, num_clients,
             processed = min((batch_idx) * global_batch_size, total_number_of_samples)
             print(f"eps: {rnd}, bi: {batch_idx}, processed: {processed} / {total_number_of_samples} samples")
 
-            # ----------------------------------------------------
-            # 1️⃣ Request embeddings from all clients
-            # ----------------------------------------------------
+            # 1 Request embeddings from all clients
             start = batch_idx * global_batch_size
             end = min(start + global_batch_size, total_number_of_samples)
 
@@ -197,9 +183,7 @@ def train(grid, context, num_rounds, lr, embedding_dim, num_clients,
             log(INFO, "Requesting embeddings from %s clients", len(messages))
             replies = grid.send_and_receive(messages)
 
-            # ----------------------------------------------------
-            # 2️⃣ Assemble embedding matrix H
-            # ----------------------------------------------------
+            # 2 Assemble embedding matrix H
             embedding_dim = NEURONS_PER_LAYER
             num_clients = len(node_ids)
             effective_batch_size = y.shape[1]
@@ -220,28 +204,20 @@ def train(grid, context, num_rounds, lr, embedding_dim, num_clients,
                 H[start:end, :] = emb
                 node_pos_map[node_id] = (start, embedding_dim)
 
-            # ----------------------------------------------------
-            # 3️⃣ Server forward + backward (NumPy)
-            # ----------------------------------------------------
+            # 3 Server forward + backward (NumPy)
             grads_w, grads_b, grad_H = server.backward(H, y)
 
-            # ----------------------------------------------------
-            # 4️⃣ Update server parameters (SGD)
-            # ----------------------------------------------------
+            # 4 Update server parameters (SGD)
             for i in range(len(server.weights)):
                 server.weights[i] -= lr * grads_w[i]
                 server.biases[i] -= lr * grads_b[i]
 
-            # ----------------------------------------------------
-            # 5️⃣ Split embedding gradients per client
-            # ----------------------------------------------------
+            # 5 Split embedding gradients per client
             grad_per_client = {}
             for node_id, (start, dim) in node_pos_map.items():
                 grad_per_client[node_id] = grad_H[start : start + dim, :]
 
-            # ----------------------------------------------------
-            # 6️⃣ Send gradients back to clients
-            # ----------------------------------------------------
+            # 6 Send gradients back to clients
             grad_messages = []
             for node_id, grad in grad_per_client.items():
                 grad_messages.append(
@@ -273,12 +249,8 @@ def test(grid, context, num_rounds, lr, embedding_dim, num_clients,
     prediction_history = defaultdict(list)
     total_inference_time_ms = 0
     total_samples = 0
-    # ============================================================
     # Testing loop
-    # ============================================================
-    log(INFO, "====================")
     log(INFO, "STARTING TESTING")
-    log(INFO, "====================")
 
     for batch_idx, batch in enumerate(testloader):
         y = batch["y"]  # shape: (output_size, B)
@@ -286,9 +258,7 @@ def test(grid, context, num_rounds, lr, embedding_dim, num_clients,
         processed = min((batch_idx) * global_batch_size, total_number_of_samples)
         print(f"bi: {batch_idx}, processed: {processed} / {total_number_of_samples} samples")
 
-        # ----------------------------------------------------
-        # 1️⃣ Request embeddings from all clients
-        # ----------------------------------------------------
+        # 1 Request embeddings from all clients
         start = batch_idx * global_batch_size
         end = min(start + effective_batch_size, total_number_of_samples)
 
@@ -316,9 +286,7 @@ def test(grid, context, num_rounds, lr, embedding_dim, num_clients,
         t0 = time.time()
         replies = grid.send_and_receive(messages)
 
-        # ----------------------------------------------------
-        # 2️⃣ Assemble embedding matrix H
-        # ----------------------------------------------------
+        # 2 Assemble embedding matrix H
         embedding_dim = NEURONS_PER_LAYER
         num_clients = len(node_ids)
         effective_batch_size = y.shape[1]
@@ -333,9 +301,7 @@ def test(grid, context, num_rounds, lr, embedding_dim, num_clients,
             end_row = start_row + embedding_dim
             H[start_row:end_row, :] = emb
 
-        # ----------------------------------------------------
-        # 3️⃣ Server forward (no backward)
-        # ----------------------------------------------------
+        # 3 Server forward (no backward)
         predictions_probs, _, _ = server.forward(H)
 
         t1 = time.time()
@@ -354,9 +320,7 @@ def test(grid, context, num_rounds, lr, embedding_dim, num_clients,
         else:
             predictions = predictions_probs  # regression
 
-        # ----------------------------------------------------
-        # 4️⃣ Store history
-        # ----------------------------------------------------
+        # 4 Store history
         prediction_history["predictions"].extend(predictions.flatten())
         prediction_history["prediction_probs"].extend(predictions_probs.flatten())
         prediction_history["real_values"].extend(y.flatten())
@@ -444,9 +408,7 @@ def save_test_metrics_single(num_epochs,
     if real_values.ndim > 1 and real_values.shape[0] == 1:
         real_values = real_values.flatten()
     
-    # ============================================================
     # Confusion matrix
-    # ============================================================
     print("\n--- DEBUG LABEL INSPECTION ---")
 
     print("real_values shape:", real_values.shape)
@@ -475,9 +437,7 @@ def save_test_metrics_single(num_epochs,
     os.makedirs(os.path.dirname("./figures/"), exist_ok=True)
     show_confusion_matrix(df_cm, annot, confusion_matrix_fig_size, confusion_matrix_file_name, num_epochs)
 
-    # ============================================================
     # Compute metrics
-    # ============================================================
     test_metrics = defaultdict(float)
 
     # Micro accuracy
@@ -510,9 +470,7 @@ def save_test_metrics_single(num_epochs,
     # Inference time
     test_metrics["inference_time"] = inference_time
 
-    # ============================================================
     # Save metrics
-    # ============================================================
     metrics_path = os.path.join(model_directory, f"test_metrics_{model_name}.npz")
     np.savez(metrics_path, **test_metrics)
 

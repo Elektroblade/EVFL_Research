@@ -1,12 +1,13 @@
 ---
-tags: [quickstart, vision, fds]
-dataset: [CIFAR-10]
-framework: [torch, torchvision]
+tags: [vertical fl]
+dataset: [InSDN_DatasetCSV]
+framework: [numpy]
 ---
 
-# Federated Learning with PyTorch and Flower (Quickstart Example)
+# Vertical Federated Learning with NumPy and Flower
 
-This introductory example to Flower uses PyTorch, but deep knowledge of PyTorch is not necessarily required to run the example. However, it will help you understand how to adapt Flower to your use case. Running this example in itself is quite easy. This example uses [Flower Datasets](https://flower.ai/docs/datasets/) to download, partition and preprocess the CIFAR-10 dataset.
+evfl/data_preprocessing.py makes the dataset ready to load.
+evfl/server_app.py is the main class.
 
 ## Set up the project
 

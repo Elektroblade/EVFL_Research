@@ -70,9 +70,7 @@ def get_batch(loader, batch_idx):
 
     raise IndexError("Batch index out of range")
 
-# ------------------------------------------------------------------
-# 1️⃣ Forward pass: generate embeddings
-# ------------------------------------------------------------------
+# 1 Forward pass: generate embeddings
 @app.query("forward")
 def forward(msg: Message, context: Context) -> Message:
     partition_id = context.node_config["partition-id"]
@@ -81,9 +79,7 @@ def forward(msg: Message, context: Context) -> Message:
     batch_idx = msg.content["config"]["batch_idx"]
     node_id = context
 
-    # --------------------------------------------------
     # First-time initialization
-    # --------------------------------------------------
     if "model" not in context.state:
 
         model = _init_model(context)
@@ -100,9 +96,7 @@ def forward(msg: Message, context: Context) -> Message:
 
         context.state["model"] = ArrayRecord(array_dict)
 
-    # --------------------------------------------------
     # Restore model from state
-    # --------------------------------------------------
     stored = context.state["model"]
 
     num_layers = len([k for k in stored.keys() if "weights_" in k])
@@ -129,9 +123,7 @@ def forward(msg: Message, context: Context) -> Message:
 
     X_train = load_data(context, model)
 
-    # --------------------------------------------------
     # Deterministic batch slicing
-    # --------------------------------------------------
 
     num_samples = X_train.shape[0]
     num_batches = (num_samples + global_batch_size - 1) // global_batch_size
@@ -147,9 +139,7 @@ def forward(msg: Message, context: Context) -> Message:
     # Transpose to (features, batch_size)
     X_batch = X_batch.T
 
-    # --------------------------------------------------
     # Forward pass
-    # --------------------------------------------------
     h = model.forward(X_batch)
 
     #print("Client embedding shape after forward:", h.shape)
@@ -167,9 +157,7 @@ def forward(msg: Message, context: Context) -> Message:
     )
 
 
-# ------------------------------------------------------------------
-# 2️⃣ Backward pass: apply gradients
-# ------------------------------------------------------------------
+# 2 Backward pass: apply gradients
 @app.train("backward")
 def backward(msg: Message, context: Context) -> Message:
     mode = msg.content["config"]["mode"]
@@ -184,13 +172,13 @@ def backward(msg: Message, context: Context) -> Message:
     global_batch_size = msg.content["config"]["global_batch_size"]
     batch_idx = msg.content["config"]["batch_idx"]  # must be sent from server
 
-    # 1️⃣ Reload dataset
+    # 1 Reload dataset
     model = _init_model(context)
     X_train = load_data(context, model)
 
     #print("X_train type during backward:", type(X_train))
 
-    # 2️⃣ Deterministic batch slicing (same as forward)
+    # 2 Deterministic batch slicing (same as forward)
     num_samples = X_train.shape[0]
     num_batches = (num_samples + global_batch_size - 1) // global_batch_size
     effective_idx = batch_idx % num_batches
@@ -200,7 +188,7 @@ def backward(msg: Message, context: Context) -> Message:
 
     X_batch = X_train[start:end].T
 
-    # 3️⃣ Restore model weights from state
+    # 3 Restore model weights from state
     stored = context.state["model"]
     num_layers = len([k for k in stored.keys() if "weights_" in k])
 
@@ -210,10 +198,10 @@ def backward(msg: Message, context: Context) -> Message:
     model.weights = weights
     model.biases = biases
 
-    # 4️⃣ Recompute forward
+    # 4 Recompute forward
     h = model.forward(X_batch)
 
-    # 5️⃣ Get gradient from server
+    # 5 Get gradient from server
     grad_h = msg.content["arrays"]["grad"].numpy()
 
     #print("grad_h.shape:", grad_h.shape, "h.shape:", h.shape)
@@ -221,16 +209,16 @@ def backward(msg: Message, context: Context) -> Message:
     # Safety check
     assert grad_h.shape == h.shape
 
-    # 6️⃣ Backprop through client model
+    # 6 Backprop through client model
     grads_w, grads_b = model.backward(X_batch, grad_h)
 
-    # 7️⃣ SGD update
+    # 7 SGD update
     lr = context.run_config["learning-rate"]
     for i in range(len(model.weights)):
         model.weights[i] -= lr * grads_w[i]
         model.biases[i] -= lr * grads_b[i]
 
-    # 8️⃣ Save updated weights back to state
+    # 8 Save updated weights back to state
     array_dict = {
         f"weights_{i}": Array(w.copy()) for i, w in enumerate(model.weights)
     }
