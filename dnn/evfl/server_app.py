@@ -1,7 +1,7 @@
 """pytorchexample: A Flower / PyTorch app."""
 
 import torch
-from flwr.app import ArrayRecord, ConfigRecord, Context, MetricRecord, Message, RecordDict
+from flwr.app import Array, ArrayRecord, ConfigRecord, Context, MetricRecord, Message, RecordDict
 from flwr.serverapp import Grid, ServerApp
 from flwr.serverapp.strategy import FedAvg
 from logging import INFO
@@ -44,18 +44,15 @@ def main(grid: Grid, context: Context) -> None:
     # ------------------------------------------------------------
     # Client embedding dimensions (fixed & known)
     # ------------------------------------------------------------
-    client_embedding_dims = {
-        f"client_{i}": dim for i, dim in enumerate(PARTITION_SIZES)
-    }
-
-    partition_id = msg.metadata["partition_id"]
-    dim = client_embedding_dims[partition_id]
+    embedding_dim = NEURONS_PER_LAYER
+    num_clients = len(PARTITION_SIZES)
 
     # ------------------------------------------------------------
     # Server-side DNN head (NumPy)
     # ------------------------------------------------------------
     server = ServerDNN(
-        client_embedding_dims=client_embedding_dims,
+        num_clients=num_clients,
+        embedding_dim=embedding_dim,
         output_size=OUTPUT_SIZE,
         hidden_layers=HIDDEN_LAYERS,
         neurons_per_layer=NEURONS_PER_LAYER,
@@ -70,8 +67,13 @@ def main(grid: Grid, context: Context) -> None:
     # ------------------------------------------------------------
     trainloader, _ = server.load_centralized_labels(batch_size=batch_size)
 
-    node_ids = list(grid.get_node_ids()) # TODO this causes problems
+    node_ids = list(grid.get_node_ids())
     log(INFO, "Connected clients: %s", node_ids)
+
+    client_embedding_dims = {
+        node_id: NEURONS_PER_LAYER
+        for node_id in node_ids
+    }
 
     if len(node_ids) != len(client_embedding_dims):
         raise ValueError(
@@ -117,25 +119,25 @@ def main(grid: Grid, context: Context) -> None:
             # ----------------------------------------------------
             # 2️⃣ Assemble embedding matrix H
             # ----------------------------------------------------
-            total_dim = sum(client_embedding_dims.values())
+            embedding_dim = NEURONS_PER_LAYER
+            num_clients = len(node_ids)
             batch_size = y.shape[1]
+
+            total_dim = embedding_dim * num_clients
             H = np.zeros((total_dim, batch_size))
 
-            node_pos_map: dict[str, int] = {}
+            node_pos_map: dict[int, tuple[int, int]] = {}
 
-            offset = 0
-            for reply in replies:
+            for i, reply in enumerate(replies):
                 node_id = reply.metadata.src_node_id
 
-                arr = reply.content["arrays"]["activations"]
-                emb = arr.numpy()
+                emb = reply.content["arrays"]["activations"].numpy()
 
-                pos = reply.content["config"]["pos"]
-                dim = client_embedding_dims[node_id]
+                start = i * embedding_dim
+                end = start + embedding_dim
 
-                H[offset : offset + dim, :] = emb
-                node_pos_map[node_id] = offset
-                offset += dim
+                H[start:end, :] = emb
+                node_pos_map[node_id] = (start, embedding_dim)
 
             # ----------------------------------------------------
             # 3️⃣ Server forward + backward (NumPy)
@@ -153,8 +155,7 @@ def main(grid: Grid, context: Context) -> None:
             # 5️⃣ Split embedding gradients per client
             # ----------------------------------------------------
             grad_per_client = {}
-            for node_id, start in node_pos_map.items():
-                dim = client_embedding_dims[node_id]
+            for node_id, (start, dim) in node_pos_map.items():
                 grad_per_client[node_id] = grad_H[start : start + dim, :]
 
             # ----------------------------------------------------
@@ -167,6 +168,9 @@ def main(grid: Grid, context: Context) -> None:
                         content=RecordDict({
                             "arrays": ArrayRecord({
                                 "grad": Array(grad),
+                            }),
+                            "config": ConfigRecord({
+                                "batch_idx": batch_idx,
                             }),
                         }),
                         message_type="train.backward",

@@ -31,7 +31,8 @@ from evfl.dnn import (
 class ServerDNN:
     def __init__(
         self,
-        client_embedding_dims,   # dict: {client_id: dim}
+        num_clients,
+        embedding_dim,
         output_size,
         hidden_layers,
         neurons_per_layer,
@@ -42,8 +43,7 @@ class ServerDNN:
     ):
         assert task_type in ["binary", "multiclass", "regression"]
 
-        self.client_embedding_dims = client_embedding_dims
-        self.input_size = sum(client_embedding_dims.values())
+        self.input_size = num_clients * embedding_dim
         self.output_size = output_size
         self.hidden_layers = hidden_layers
         self.neurons_per_layer = neurons_per_layer
@@ -129,12 +129,10 @@ class ServerDNN:
 
     def split_embedding_gradients(self, grad_embeddings):
         grads = {}
-        start = 0
-
-        for client_id, dim in self.client_embedding_dims.items():
-            grads[client_id] = grad_embeddings[start:start + dim]
-            start += dim
-
+        for i, client_id in enumerate(self.client_ids):
+            start = i * self.embedding_dim
+            end = start + self.embedding_dim
+            grads[client_id] = grad_embeddings[start:end]
         return grads
 
     

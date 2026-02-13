@@ -27,10 +27,6 @@ from evfl.client_dnn import (
 app = ClientApp()
 
 # ---- Globals ----
-_batches_per_client: dict[int, list] = {}  # partition_id -> list of batches
-# top-level global variable
-_last_batch_x = {}
-_client_data = {}
 
 
 
@@ -54,6 +50,8 @@ def _init_model_and_loader(context: Context):
         batch_size,
     )
 
+    print("X_train type during init:", type(X_train))
+
     return model, X_train  # materialize for deterministic indexing
 
 def get_batch(loader, batch_idx):
@@ -74,6 +72,7 @@ def forward(msg: Message, context: Context) -> Message:
     partition_id = context.node_config["partition-id"]
     batch_size = context.run_config["batch-size"]
     batch_idx = msg.content["config"]["batch_idx"]
+    node_id = context
 
     # --------------------------------------------------
     # First-time initialization
@@ -81,9 +80,6 @@ def forward(msg: Message, context: Context) -> Message:
     if "model" not in context.state:
 
         model, X_train = _init_model_and_loader(context)
-
-        # Store dataset directly in state (no globals)
-        _client_data[partition_id] = X_train
 
         # Store model parameters
         array_dict = {
@@ -96,6 +92,8 @@ def forward(msg: Message, context: Context) -> Message:
         })
 
         context.state["model"] = ArrayRecord(array_dict)
+    else:
+        _, X_train = _init_model_and_loader(context)
 
     # --------------------------------------------------
     # Restore model from state
@@ -127,7 +125,6 @@ def forward(msg: Message, context: Context) -> Message:
     # --------------------------------------------------
     # Deterministic batch slicing
     # --------------------------------------------------
-    X_train = _client_data[partition_id]
 
     num_samples = X_train.shape[0]
     num_batches = (num_samples + batch_size - 1) // batch_size
@@ -143,13 +140,12 @@ def forward(msg: Message, context: Context) -> Message:
     # Transpose to (features, batch_size)
     X_batch = X_batch.T
 
-    # Cache for backward pass
-    _last_batch_x[partition_id] = X_batch
-
     # --------------------------------------------------
     # Forward pass
     # --------------------------------------------------
     h = model.forward(X_batch)
+
+    print("Client embedding shape after forward:", h.shape)
 
     return Message(
         content=RecordDict({
@@ -160,8 +156,7 @@ def forward(msg: Message, context: Context) -> Message:
                 "pos": partition_id,
             }),
         }),
-        reply_to=msg,
-        metadata={"partition_id": partition_id}
+        reply_to=msg
     )
 
 
@@ -170,29 +165,61 @@ def forward(msg: Message, context: Context) -> Message:
 # ------------------------------------------------------------------
 @app.train("backward")
 def backward(msg: Message, context: Context) -> Message:
-    model: ClientDNN = context.state["model"]
     partition_id = context.node_config["partition-id"]
-    X = _last_batch_x[partition_id]
+    batch_size = context.run_config["batch-size"]
+    batch_idx = msg.content["config"]["batch_idx"]  # must be sent from server
 
-    grad_h = msg.content["arrays"]["grad"].numpy()  # (d_embed, B)
+    # 1️⃣ Reload dataset
+    model, X_train = _init_model_and_loader(context)
 
-    # Backward pass
-    grads_w, grads_b = model.backward(X, grad_h)
+    print("X_train type during backward:", type(X_train))
 
-    # SGD update
+    # 2️⃣ Deterministic batch slicing (same as forward)
+    num_samples = X_train.shape[0]
+    num_batches = (num_samples + batch_size - 1) // batch_size
+    effective_idx = batch_idx % num_batches
+
+    start = effective_idx * batch_size
+    end = min(start + batch_size, num_samples)
+
+    X_batch = X_train[start:end].T
+
+    # 3️⃣ Restore model weights from state
+    stored = context.state["model"]
+    num_layers = len([k for k in stored.keys() if "weights_" in k])
+
+    weights = [stored[f"weights_{i}"].numpy() for i in range(num_layers)]
+    biases = [stored[f"biases_{i}"].numpy() for i in range(num_layers)]
+
+    model.weights = weights
+    model.biases = biases
+
+    # 4️⃣ Recompute forward
+    h = model.forward(X_batch)
+
+    # 5️⃣ Get gradient from server
+    grad_h = msg.content["arrays"]["grad"].numpy()
+
+    # Safety check
+    assert grad_h.shape == h.shape
+
+    # 6️⃣ Backprop through client model
+    grads_w, grads_b = model.backward(X_batch, grad_h)
+
+    # 7️⃣ SGD update
     lr = context.run_config["learning-rate"]
     for i in range(len(model.weights)):
         model.weights[i] -= lr * grads_w[i]
         model.biases[i] -= lr * grads_b[i]
 
-    # Persist model
-    # Store model weights/biases in ArrayRecord
+    # 8️⃣ Save updated weights back to state
     array_dict = {
         f"weights_{i}": Array(w.copy()) for i, w in enumerate(model.weights)
     }
     array_dict.update({
         f"biases_{i}": Array(b.copy()) for i, b in enumerate(model.biases)
     })
+
     context.state["model"] = ArrayRecord(array_dict)
 
-    return Message(content=RecordDict(), reply_to=msg, metadata={"partition_id": partition_id})
+    return Message(content=RecordDict(), reply_to=msg)
