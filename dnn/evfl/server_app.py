@@ -16,6 +16,7 @@ import matplotlib.pyplot as plt
 import matplotlib.cm as cm
 import seaborn as sns
 import os
+import gc
 from sklearn.metrics import (
     confusion_matrix,
     classification_report,
@@ -183,6 +184,7 @@ def train(grid, context, num_rounds, lr, embedding_dim, num_clients,
 
             log(INFO, "Requesting embeddings from %s clients", len(messages))
             replies = grid.send_and_receive(messages)
+            log(INFO, "Received embeddings from %s clients", len(messages))
 
             # 2 Assemble embedding matrix H
             embedding_dim = NEURONS_PER_LAYER
@@ -241,6 +243,10 @@ def train(grid, context, num_rounds, lr, embedding_dim, num_clients,
 
             log(INFO, "Sending gradients to %s clients", len(grad_messages))
             grid.push_messages(grad_messages)
+
+            del grad_H
+            del H
+            gc.collect()  # force Python garbage collection
 
         log(INFO, "Round %s complete", rnd)
     return server

@@ -4,6 +4,8 @@ import torch
 from flwr.app import ArrayRecord, Context, Message, MetricRecord, RecordDict, ConfigRecord, Array
 from flwr.clientapp import ClientApp
 import numpy as np
+from logging import INFO
+from flwr.common import log
 
 from evfl.dnn import (
     DNN,
@@ -30,8 +32,6 @@ app = ClientApp()
 
 # ---- Globals ----
 
-
-
 def _init_model(context: Context):
     """Initialize model and dataloader deterministically."""
     partition_id = context.node_config["partition-id"]
@@ -53,12 +53,14 @@ def load_data(context: Context, model):
     global_batch_size = context.run_config["batch-size"]
     subset_size = context.run_config["subset"]
 
+    log(INFO, f"Loading data for p{partition_id}...")
     X_train, _ = model.load_data(
         partition_id,
         num_partitions,
         global_batch_size,
         subset_size
     )
+    log(INFO, f"Loaded data for p{partition_id}")
 
     return X_train  # materialize for deterministic indexing
 
