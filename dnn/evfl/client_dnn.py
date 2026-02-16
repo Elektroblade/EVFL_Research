@@ -11,6 +11,8 @@ import torch
 from pathlib import Path
 from torch.utils.data import DataLoader
 from datasets import load_from_disk
+from logging import INFO
+from flwr.common import log
 
 from evfl.dnn import (
     DNN,
@@ -120,72 +122,74 @@ class ClientDNN:
         """
 
         if self.has_dataset == False:
-            self.partitioner = VerticalSizePartitioner(
+            partitioner = VerticalSizePartitioner(
                 partition_sizes=PARTITION_SIZES,
                 active_party_columns="target",          # label exists
                 active_party_columns_mode="create_as_last",
             )
 
             loaded_dataset = load_from_disk(DATASET_DIR)
-            self.partitioner.dataset = loaded_dataset["train"]
+            partitioner.dataset = loaded_dataset["train"]
             self.has_dataset = True
 
-        # ------------------------------------------------------
-        # Load THIS CLIENT'S vertical slice (features only)
-        # ------------------------------------------------------
-        partition = self.partitioner.load_partition(partition_id)
+            # ------------------------------------------------------
+            # Load THIS CLIENT'S vertical slice (features only)
+            # ------------------------------------------------------
+            partition = partitioner.load_partition(partition_id)
 
-        #print(f"[Client {partition_id}] columns:", partition.column_names)
+            #print(f"[Client {partition_id}] columns:", partition.column_names)
 
-        # ---- Drop label if present (safety) ----
-        if "target" in partition.column_names:
-            partition = partition.remove_columns(["target"])
+            # ---- Drop label if present (safety) ----
+            if "target" in partition.column_names:
+                partition = partition.remove_columns(["target"])
 
-        self.feature_cols = [
-            c for c in partition.column_names
-        ]
+            self.feature_cols = [
+                c for c in partition.column_names
+            ]
 
-        # ---- Train / test split (must be deterministic) ----
-        partition = partition.train_test_split(
-            test_size=0.2,
-            seed=SEED,
-        )
+            # ---- Train / test split (must be deterministic) ----
+            partition = partition.train_test_split(
+                test_size=0.2,
+                seed=SEED,
+            )
 
-        # ---- Apply preprocessing (normalization, etc.) ----
-        #partition = partition.with_transform(self.apply_transforms_no_labels)
+            # ---- Apply preprocessing (normalization, etc.) ----
+            #partition = partition.with_transform(self.apply_transforms_no_labels)
 
-        g = torch.Generator().manual_seed(SEED)
+            g = torch.Generator().manual_seed(SEED)
 
-        if 0 < subset_size < len(partition["train"]):
-            train_dataset = partition["train"].select(range(subset_size))
-            test_dataset = partition["test"].select(range(subset_size))
-        else:
-            train_dataset = partition["train"]
-            test_dataset = partition["test"]
+            if 0 < subset_size < len(partition["train"]):
+                train_dataset = partition["train"].select(range(subset_size))
+                test_dataset = partition["test"].select(range(subset_size))
+            else:
+                train_dataset = partition["train"]
+                test_dataset = partition["test"]
 
-        train_dataset = partition["train"]
-        test_dataset = partition["test"]
+            train_cols = train_dataset.column_names
+            test_cols = test_dataset.column_names
 
-        train_cols = train_dataset.column_names
-        test_cols = test_dataset.column_names
+            #log(INFO, f"Creating X_train for client {partition_id}...")
 
-        # Convert once to NumPy arrays (features only)
-        X_train = np.stack(
-            [
-                np.array(train_dataset[col])
-                for col in train_cols
-            ],
-            axis=1
-        ).astype(np.float32)
-        X_test = np.stack(
-            [
-                np.array(test_dataset[col])
-                for col in test_cols
-            ],
-            axis=1
-        ).astype(np.float32)
+            # Convert once to NumPy arrays (features only)
+            self.X_train = np.stack(
+                [
+                    np.array(train_dataset[col])
+                    for col in train_cols
+                ],
+                axis=1
+            ).astype(np.float32)
 
-        return X_train, X_test
+            #log(INFO, f"Creating X_test for client {partition_id}...")
+
+            self.X_test = np.stack(
+                [
+                    np.array(test_dataset[col])
+                    for col in test_cols
+                ],
+                axis=1
+            ).astype(np.float32)
+
+        return self.X_train, self.X_test
 
     
     def apply_transforms_no_labels(self, batch):

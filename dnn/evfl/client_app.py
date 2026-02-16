@@ -37,6 +37,11 @@ def _init_model(context: Context):
     partition_id = context.node_config["partition-id"]
     num_partitions = context.node_config["num-partitions"]
 
+    if partition_id >= len(PARTITION_SIZES):
+        raise ValueError(
+            f"Partition ID {partition_id} exceeds PARTITION_SIZES length {len(PARTITION_SIZES)}"
+        )
+
     model = ClientDNN(
         input_size=PARTITION_SIZES[partition_id],
         hidden_layers=HIDDEN_LAYERS,
@@ -54,15 +59,19 @@ def load_data(context: Context, model):
     subset_size = context.run_config["subset"]
 
     log(INFO, f"Loading data for p{partition_id}...")
-    X_train, _ = model.load_data(
+    X_train, X_test = model.load_data(
         partition_id,
         num_partitions,
         global_batch_size,
         subset_size
     )
+
+    print(type(X_train), type(X_test))
+    print(isinstance(X_train, np.ndarray), isinstance(X_test, np.ndarray))
+
     log(INFO, f"Loaded data for p{partition_id}")
 
-    return X_train  # materialize for deterministic indexing
+    context.state["data"] = ArrayRecord([X_train, X_test], keep_input=True)
 
 def get_batch(loader, batch_idx):
     num_batches = len(loader)  # safe for PyTorch DataLoader
@@ -82,6 +91,7 @@ def forward(msg: Message, context: Context) -> Message:
     global_batch_size = msg.content["config"]["global_batch_size"]
     batch_idx = msg.content["config"]["batch_idx"]
     node_id = context
+    mode = msg.content["config"]["mode"]
 
     # First-time initialization
     if "model" not in context.state:
@@ -125,11 +135,17 @@ def forward(msg: Message, context: Context) -> Message:
     model.weights = weights
     model.biases = biases
 
-    X_train = load_data(context, model)
+    if "data" not in context.state:
+        load_data(context, model)
+
+    if mode == -1:
+        X = context.state["data"].to_numpy_ndarrays()[1]
+    else:
+        X = context.state["data"].to_numpy_ndarrays()[0]
 
     # Deterministic batch slicing
 
-    num_samples = X_train.shape[0]
+    num_samples = X.shape[0]
     num_batches = (num_samples + global_batch_size - 1) // global_batch_size
 
     effective_idx = batch_idx % num_batches
@@ -138,7 +154,7 @@ def forward(msg: Message, context: Context) -> Message:
     end = min(start + effective_batch_size, num_samples)
 
     # Slice rows (samples)
-    X_batch = X_train[start:end]
+    X_batch = X[start:end]
 
     # Transpose to (features, batch_size)
     X_batch = X_batch.T
@@ -160,7 +176,6 @@ def forward(msg: Message, context: Context) -> Message:
         reply_to=msg
     )
 
-
 # 2 Backward pass: apply gradients
 @app.train("backward")
 def backward(msg: Message, context: Context) -> Message:
@@ -178,7 +193,10 @@ def backward(msg: Message, context: Context) -> Message:
 
     # 1 Reload dataset
     model = _init_model(context)
-    X_train = load_data(context, model)
+    if "data" not in context.state:
+        load_data(context, model)
+    #log(INFO, f"Loading data for p{partition_id}..., context.state[\"data\"].type = {type(context.state["data"])}")
+    X_train = context.state["data"].to_numpy_ndarrays()[0]
 
     #print("X_train type during backward:", type(X_train))
 

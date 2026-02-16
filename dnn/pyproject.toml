@@ -25,7 +25,7 @@ serverapp = "evfl.server_app:app"
 clientapp = "evfl.client_app:app"
 
 [tool.flwr.app.config]
-num-server-rounds = 2
+num-server-rounds = 3
 fraction-evaluate = 0.5
 local-epochs = 1
 learning-rate = 0.0001
@@ -33,7 +33,23 @@ batch-size = 64
 num-partitions = 3
 partition-id = 0
 min-partition-size = 2
-subset = 65
+subset = 50000
+
+
+#######################################################################
+# CONFIGURATION MIGRATION NOTICE:
+#
+# What was previously called "federation config" for SuperLink
+# connections in pyproject.toml has been renamed and moved.
+#
+# These settings are now **SuperLink connection configuration**
+# and are defined in the Flower configuration file.
+#
+# The entries below are commented out intentionally and are kept
+# only as a migration reference.
+#
+# Docs: https://flower.ai/docs/framework/ref-flower-configuration.html
+#######################################################################
 
 
 #######################################################################
