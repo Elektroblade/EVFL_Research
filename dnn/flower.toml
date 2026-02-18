@@ -1,0 +1,14 @@
+[superlink]
+federation = "local-simulation"
+
+[superlink.federations.local-simulation]
+options.num-supernodes = 3
+
+[superlink.federations.local-simulation-gpu]
+options.num-supernodes = 3
+options.backend.client-resources.num-cpus = 2
+options.backend.client-resources.num-gpus = 0.2
+
+[superlink.federations.supergrid-deployment]
+address = "supergrid.flower.ai"
+enable-account-auth = true

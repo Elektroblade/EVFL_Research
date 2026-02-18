@@ -100,8 +100,17 @@ def main(grid: Grid, context: Context) -> None:
             f"but got {len(node_ids)}"
         )
 
-    server = train(grid, context, num_rounds, lr, embedding_dim, num_clients,
+    server, training_history = train(grid, context, num_rounds, lr, embedding_dim, num_clients,
           server, trainloader, total_number_of_samples, node_ids, global_batch_size)
+    
+    # Save to disk
+    np.savez(
+        f"./server_model/prediction_history_dnn_vfl_{subset_size}sa.npz",
+        predictions=training_history["predictions"],
+        prediction_probs=training_history["prediction_probs"],
+        real_values=training_history["real_values"],
+        avg_inference_time_ms=training_history["avg_inference_time_ms"],
+    )
 
     # Save final server model
     log(INFO, "")
@@ -141,28 +150,35 @@ def main(grid: Grid, context: Context) -> None:
 def train(grid, context, num_rounds, lr, embedding_dim, num_clients,
           server, trainloader, total_number_of_samples, node_ids, global_batch_size):
     # Training loop
+    training_history = defaultdict(list)
+    total_inference_time_ms = 0
+    processed_samples = 0
     log(INFO, "STARTING TRAINING")
+
     for rnd in range(1, num_rounds + 1):
+        num_samples = trainloader.shape[1]
+
+        training_history["predictions"].append([])
+        training_history["prediction_probs"].append([])
+        training_history["real_values"].append([])
+
         log(INFO, "")
         log(INFO, "=== Server Round %s / %s ===", rnd, num_rounds)
 
         # NOTE:
         # This implementation assumes *aligned batches*
         # across clients and server (same sample indices).
-        for batch_idx, batch in enumerate(trainloader):
-            y = batch["y"]  # shape: (output_size, B)
+        for batch_count, start in enumerate(range(0, num_samples, global_batch_size)):
+            end = min(start + global_batch_size, num_samples)
+            y = trainloader[:, start:end]  # shape: (output_size, B)
 
-            #print("Server train y shape:", y.shape)
             #print("Server train Unique y values:", np.unique(y))
 
             effective_batch_size = y.shape[1]
-            processed = min((batch_idx) * global_batch_size, total_number_of_samples)
-            log(INFO, f"eps: {rnd}, bi: {batch_idx}, processed: {processed} / {total_number_of_samples} samples")
+            processed = min(end, num_samples)
+            log(INFO, f"eps: {rnd}, bi: {batch_count}, processed: {processed} / {total_number_of_samples} samples")
 
             # 1 Request embeddings from all clients
-            start = batch_idx * global_batch_size
-            end = min(start + global_batch_size, total_number_of_samples)
-
             messages = []
             for pos, node_id in enumerate(node_ids):
                 messages.append(
@@ -170,7 +186,7 @@ def train(grid, context, num_rounds, lr, embedding_dim, num_clients,
                         content=RecordDict({
                             "config": ConfigRecord({
                                 "round": rnd,
-                                "batch_idx": batch_idx,
+                                "batch_idx": batch_count,
                                 "pos": pos,
                                 "global_batch_size": global_batch_size,
                                 "effective_batch_size": effective_batch_size,  # <--- pass correct batch size
@@ -182,6 +198,7 @@ def train(grid, context, num_rounds, lr, embedding_dim, num_clients,
                     )
                 )
 
+            t0 = time.time()
             #log(INFO, "Requesting embeddings from %s clients", len(messages))
             replies = grid.send_and_receive(messages)
             #log(INFO, "Received embeddings from %s clients", len(messages))
@@ -208,12 +225,28 @@ def train(grid, context, num_rounds, lr, embedding_dim, num_clients,
                 node_pos_map[node_id] = (start, embedding_dim)
 
             # 3 Server forward + backward (NumPy)
-            grads_w, grads_b, grad_H = server.backward(H, y)
+            grads_w, grads_b, grad_H, predictions_probs = server.backward(H, y)
 
             # 4 Update server parameters (SGD)
             for i in range(len(server.weights)):
                 server.weights[i] -= lr * grads_w[i]
                 server.biases[i] -= lr * grads_b[i]
+            
+            t1 = time.time()
+            batch_time_ms = (t1 - t0) * 1000
+            batch_time_ms = (t1 - t0) * 1000
+
+            total_inference_time_ms += batch_time_ms
+            processed_samples += effective_batch_size
+
+            # Convert to predicted classes if multiclass
+            if server.task_type == "multiclass":
+                #print("Output shape:", predictions_probs.shape)
+                predictions = np.argmax(predictions_probs, axis=0)
+            elif server.task_type == "binary":
+                predictions = (predictions_probs > 0.5).astype(int)
+            else:
+                predictions = predictions_probs  # regression
 
             # 5 Split embedding gradients per client
             grad_per_client = {}
@@ -232,7 +265,7 @@ def train(grid, context, num_rounds, lr, embedding_dim, num_clients,
                             "config": ConfigRecord({
                                 "global_batch_size": global_batch_size,
                                 "effective_batch_size": effective_batch_size,
-                                "batch_idx": batch_idx,
+                                "batch_idx": batch_count,
                                 "mode": 0
                             }),
                         }),
@@ -244,31 +277,60 @@ def train(grid, context, num_rounds, lr, embedding_dim, num_clients,
             #log(INFO, "Sending gradients to %s clients", len(grad_messages))
             grid.push_messages(grad_messages)
 
+            # 4 Store history
+            training_history["predictions"][rnd-1].extend(predictions.flatten())
+            training_history["prediction_probs"][rnd-1].extend(predictions_probs.flatten())
+            if server.task_type == "multiclass":
+                true_labels = np.argmax(y, axis=0)
+            elif server.task_type == "binary":
+                true_labels = y.flatten()
+            else:
+                true_labels = y.flatten()
+
+            training_history["real_values"][rnd-1].extend(true_labels)
+
             del grad_H
             del H
             gc.collect()  # force Python garbage collection
 
         log(INFO, "Round %s complete", rnd)
-    return server
+        print("Total samples:", processed_samples)
+
+    training_history["predictions"] = np.stack(
+        training_history["predictions"], axis=0
+    ).astype(np.int32)
+    training_history["prediction_probs"] = np.stack(
+        training_history["prediction_probs"], axis=0
+    ).astype(np.int32)
+    training_history["real_values"] = np.stack(
+        training_history["real_values"], axis=0
+    ).astype(np.int32)
+
+    # avg_inference_time_ms: keep as list or average over batches
+    avg_per_sample_time_ms = total_inference_time_ms / processed_samples
+
+    training_history["avg_inference_time_ms"] = np.array([avg_per_sample_time_ms]).astype(np.int32)
+    return server, training_history
+
 
 def test(grid, context, num_rounds, lr, embedding_dim, num_clients,
           server, testloader, total_number_of_samples, node_ids, global_batch_size):
     prediction_history = defaultdict(list)
     total_inference_time_ms = 0
-    total_samples = 0
+    processed_samples = 0
+
+    num_samples = testloader.shape[1]
     # Testing loop
     log(INFO, "STARTING TESTING")
 
-    for batch_idx, batch in enumerate(testloader):
-        y = batch["y"]  # shape: (output_size, B)
+    for batch_count, start in enumerate(range(0, num_samples, global_batch_size)):
+        end = min(start + global_batch_size, num_samples)
+        y = testloader[:, start:end]  # shape: (N,)
         effective_batch_size = y.shape[1]
-        processed = min((batch_idx) * global_batch_size, total_number_of_samples)
-        print(f"bi: {batch_idx}, processed: {processed} / {total_number_of_samples} samples")
+        processed = min(end, total_number_of_samples)
+        print(f"bi: {batch_count}, processed: {processed} / {total_number_of_samples} samples")
 
         # 1 Request embeddings from all clients
-        start = batch_idx * global_batch_size
-        end = min(start + effective_batch_size, total_number_of_samples)
-
         messages = []
         for pos, node_id in enumerate(node_ids):
             messages.append(
@@ -276,7 +338,7 @@ def test(grid, context, num_rounds, lr, embedding_dim, num_clients,
                     content=RecordDict({
                         "config": ConfigRecord({
                             "round": 0,
-                            "batch_idx": batch_idx,
+                            "batch_idx": batch_count,
                             "pos": pos,
                             "global_batch_size": global_batch_size,
                             "effective_batch_size": effective_batch_size,  # <--- pass correct batch size
@@ -288,7 +350,7 @@ def test(grid, context, num_rounds, lr, embedding_dim, num_clients,
                 )
             )
 
-        log(INFO, "Requesting embeddings from %s clients", len(messages))
+        #log(INFO, "Requesting embeddings from %s clients", len(messages))
 
         t0 = time.time()
         replies = grid.send_and_receive(messages)
@@ -316,11 +378,11 @@ def test(grid, context, num_rounds, lr, embedding_dim, num_clients,
         batch_time_ms = (t1 - t0) * 1000
 
         total_inference_time_ms += batch_time_ms
-        total_samples += effective_batch_size
+        processed_samples += effective_batch_size
 
         # Convert to predicted classes if multiclass
         if server.task_type == "multiclass":
-            print("Output shape:", predictions_probs.shape)
+            #print("Output shape:", predictions_probs.shape)
             predictions = np.argmax(predictions_probs, axis=0)
         elif server.task_type == "binary":
             predictions = (predictions_probs > 0.5).astype(int)
@@ -330,16 +392,21 @@ def test(grid, context, num_rounds, lr, embedding_dim, num_clients,
         # 4 Store history
         prediction_history["predictions"].extend(predictions.flatten())
         prediction_history["prediction_probs"].extend(predictions_probs.flatten())
-        prediction_history["real_values"].extend(y.flatten())
+        if server.task_type == "multiclass":
+            true_labels = np.argmax(y, axis=0)
+        elif server.task_type == "binary":
+            true_labels = y.flatten()
+        else:
+            true_labels = y.flatten()
 
-        log(INFO, "Testing complete")
+        prediction_history["real_values"].extend(true_labels)
 
     prediction_history["predictions"] = np.array(prediction_history["predictions"])
     prediction_history["prediction_probs"] = np.array(prediction_history["prediction_probs"])
     prediction_history["real_values"] = np.array(prediction_history["real_values"])
 
     # avg_inference_time_ms: keep as list or average over batches
-    avg_per_sample_time_ms = total_inference_time_ms / total_samples
+    avg_per_sample_time_ms = total_inference_time_ms / processed_samples
 
     prediction_history["avg_inference_time_ms"] = np.array([avg_per_sample_time_ms])
 

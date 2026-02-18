@@ -138,6 +138,7 @@ def forward(msg: Message, context: Context) -> Message:
     if "data" not in context.state:
         load_data(context, model)
 
+    # determine whether to use training or testing data
     if mode == -1:
         X = context.state["data"].to_numpy_ndarrays()[1]
     else:

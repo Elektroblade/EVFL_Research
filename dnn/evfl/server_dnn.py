@@ -106,19 +106,15 @@ class ServerDNN:
         if self.task_type == "multiclass":
             batch_size = y.shape[1]
             num_classes = preds.shape[0]
-
-            y = y.astype(int)
-
-            y_onehot = np.zeros((num_classes, batch_size))
-            y_onehot[y.flatten(), np.arange(batch_size)] = 1
-
-            delta = preds - y_onehot
+            delta = preds - y
 
         elif self.task_type == "binary":
             delta = preds - y
 
         else:
             delta = preds - y
+        
+        delta /= batch_size
 
         gradients_w = [None] * len(self.weights)
         gradients_b = [None] * len(self.biases)
@@ -133,13 +129,13 @@ class ServerDNN:
                 self.weights[i + 1].T @ delta
             ) * self.activation_derivative(weighted_sums[i])
 
-            gradients_w[i] = (delta @ activations[i].T) / batch_size
+            gradients_w[i] = delta @ activations[i].T
             gradients_b[i] = np.mean(delta, axis=1, keepdims=True)
 
         # ----- Gradient w.r.t. concatenated embeddings -----
         grad_embeddings = self.weights[0].T @ delta
 
-        return gradients_w, gradients_b, grad_embeddings
+        return gradients_w, gradients_b, grad_embeddings, preds
 
 
     def split_embedding_gradients(self, grad_embeddings):
@@ -312,63 +308,36 @@ class ServerDNN:
         else:
             train_labels = label_partition["train"]
             test_labels = label_partition["test"]
+        
+        labels_train = np.array(train_labels["target"]).astype(np.int32)
+        labels_test = np.array(test_labels["target"]).astype(np.int32)
 
-        train_cols = train_labels.column_names
-        test_cols = train_labels.column_names
+        all_train_labels = np.array(label_partition["train"]["target"]).astype(np.int32)
+        all_test_labels = np.array(label_partition["test"]["target"]).astype(np.int32)
 
-        g = torch.Generator().manual_seed(SEED)
+        num_classes = int(max(all_train_labels.max(), all_test_labels.max()) + 1)
 
-        # Convert once to NumPy arrays (labels only)
-        # assuming label column is 'y'
-        y_train = np.array(train_labels["target"]).reshape(1, -1).astype(np.float32)  # shape (output_size, N)
-        y_test = np.array(test_labels["target"]).reshape(1, -1).astype(np.float32)
+        N_train = len(labels_train)
+        N_test = len(labels_test)
+
+        if num_classes == 2:
+            # Binary classification → single output neuron
+            y_train = labels_train.reshape(1, -1).astype(np.float32)
+            y_test = labels_test.reshape(1, -1).astype(np.float32)
+
+        else:
+            # Multiclass → one-hot (C, N)
+            y_train = np.zeros((num_classes, N_train), dtype=np.float32)
+            y_train[labels_train, np.arange(N_train)] = 1.0
+
+            y_test = np.zeros((num_classes, N_test), dtype=np.float32)
+            y_test[labels_test, np.arange(N_test)] = 1.0
 
         # Optionally, split into batches manually for server-side iteration
         num_samples = y_train.shape[1]
         num_batches = (num_samples + batch_size - 1) // batch_size
 
-        def batch_generator(y_data):
-            for i in range(num_batches):
-                start = i * batch_size
-                end = min(start + batch_size, num_samples)
-                yield {"y": y_data[:, start:end]}
-
-        return batch_generator(y_train), batch_generator(y_test), num_samples
-    
-    def apply_transforms(self, batch):
-        """
-        Transform HF batch into NumPy arrays compatible with the custom DNN.
-        """
-
-        # 1️⃣ Extract target
-        y = np.asarray(batch["target"], dtype=np.int64)  # shape: (batch_size,)
-
-        X = np.stack([batch[col] for col in self.feature_cols], axis=1)
-        # X shape: (batch_size, input_size)
-
-        # 3️⃣ Transpose for DNN
-        X = X.T  # (input_size, batch_size)
-        X = X.astype(np.float32)
-
-        # 4️⃣ Encode targets
-        if self.task_type == "binary":
-            y = y.astype(np.float32).reshape(1, -1)  # (1, batch_size)
-
-        elif self.task_type == "multiclass":
-            num_classes = self.num_classes
-            y_onehot = np.zeros((y.shape[0], num_classes), dtype=np.float32)
-            y_onehot[np.arange(y.shape[0]), y] = 1
-
-            y = y_onehot.T
-
-        else:  # regression
-            y = y.reshape(self.output_size, -1)
-
-        return {
-            "x": X,
-            "y": y,
-        }
-
+        return y_train, y_test, num_samples
 
 
 def sigmoid(z):
