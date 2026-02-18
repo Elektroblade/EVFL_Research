@@ -225,7 +225,7 @@ def train(grid, context, num_rounds, lr, embedding_dim, num_clients,
 
                 emb = reply.content["arrays"]["activations"].numpy()
 
-                print(f"[Client {i}] Embedding mean: {emb.mean():.6f}, std: {emb.std():.6f}, min: {emb.min():.6f}, max: {emb.max():.6f}")
+                #print(f"[Client {i}] Embedding mean: {emb.mean():.6f}, std: {emb.std():.6f}, min: {emb.min():.6f}, max: {emb.max():.6f}")
 
                 """
                 print(f"\n--- Client {node_id} Embedding Debug ---")
@@ -490,7 +490,7 @@ def save_test_metrics_single(num_epochs,
 
     os.makedirs(model_directory, exist_ok=True)
 
-    prediction_history = np.load(f"./server_model/{pred_prefix}_history_dnn_vfl_{subset_size}sa.npz", allow_pickle=True)
+    prediction_history = np.load(f"./server_model/{pred_prefix}_history_dnn_vfl_{subset_size}sa_{num_epochs}eps.npz", allow_pickle=True)
 
     if mode == -1:
         if num_epochs > 0:

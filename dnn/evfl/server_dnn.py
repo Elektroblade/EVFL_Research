@@ -123,9 +123,11 @@ class ServerDNN:
         gradients_w[-1] = (delta @ activations[-2].T) / batch_size
         gradients_b[-1] = np.mean(delta, axis=1, keepdims=True)
 
+        """
         for i, (gw, gb) in enumerate(zip(gradients_w, gradients_b)):
             if gw is not None:
                 print(f"[Layer {i}] grad_w norm: {np.linalg.norm(gw):.6f}, grad_b norm: {np.linalg.norm(gb):.6f}")
+        """
 
         # ----- Hidden layers -----
         for i in range(len(self.weights) - 2, -1, -1):
