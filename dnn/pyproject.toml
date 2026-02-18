@@ -33,7 +33,7 @@ batch-size = 64
 num-partitions = 3
 partition-id = 0
 min-partition-size = 2
-subset = 1000
+subset = 10000
 
 
 #######################################################################

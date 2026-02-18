@@ -44,9 +44,10 @@ class ClientDNN:
         for i in range(len(layer_sizes) - 1):
             fan_in = layer_sizes[i]
 
+            np.random.seed(SEED)  # same SEED for all clients
             self.weights.append(
                 np.random.randn(layer_sizes[i+1], layer_sizes[i]) * np.sqrt(2.0 / fan_in)
-            )
+)
 
             self.biases.append(
                 np.zeros((layer_sizes[i+1], 1))

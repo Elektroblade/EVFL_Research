@@ -163,12 +163,20 @@ def forward(msg: Message, context: Context) -> Message:
     # Forward pass
     h = model.forward(X_batch)
 
+    # Normalize per sample
+    h_mean = np.mean(h, axis=0, keepdims=True)
+    h_std = np.std(h, axis=0, keepdims=True) + 1e-8  # avoid div by zero
+    h_norm = (h - h_mean) / h_std
+
+    # Optionally scale by small factor
+    h_norm = h_norm * 0.5
+
     #print("Client embedding shape after forward:", h.shape)
 
     return Message(
         content=RecordDict({
             "arrays": ArrayRecord({
-                "activations": Array(h),
+                "activations": Array(h_norm),
             }),
             "config": ConfigRecord({
                 "pos": partition_id,

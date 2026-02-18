@@ -41,7 +41,8 @@ from evfl.dnn import (
     dnn_to_arrays,
     arrays_to_dnn,
     relu,
-    relu_derivative
+    relu_derivative,
+    softmax
 )
 from evfl.server_dnn import (
     ServerDNN
@@ -105,12 +106,15 @@ def main(grid: Grid, context: Context) -> None:
     
     # Save to disk
     np.savez(
-        f"./server_model/prediction_history_dnn_vfl_{subset_size}sa.npz",
+        f"./server_model/training_history_dnn_vfl_{subset_size}sa_{num_rounds}eps.npz",
         predictions=training_history["predictions"],
         prediction_probs=training_history["prediction_probs"],
         real_values=training_history["real_values"],
         avg_inference_time_ms=training_history["avg_inference_time_ms"],
     )
+
+    train_metrics_single = save_test_metrics_single(num_rounds, f"dnn_vfl_{subset_size}sa", "server_model", 
+        [0, 1, 2, 3, 4, 5, 6, 7], subset_size, mode=0)
 
     # Save final server model
     log(INFO, "")
@@ -128,7 +132,7 @@ def main(grid: Grid, context: Context) -> None:
     }
 
     os.makedirs(os.path.dirname("./server_model/"), exist_ok=True)
-    np.save(f"./server_model/dnn_vfl_{subset_size}sa.npy", server_state)
+    np.save(f"./server_model/dnn_vfl_{subset_size}sa_{num_rounds}eps.npy", server_state)
     log(INFO, "Model saved to server_model.npy")
 
     prediction_history = test(grid, context, num_rounds, lr, embedding_dim, num_clients,
@@ -136,7 +140,7 @@ def main(grid: Grid, context: Context) -> None:
     
     # Save to disk
     np.savez(
-        f"./server_model/prediction_history_dnn_vfl_{subset_size}sa.npz",
+        f"./server_model/prediction_history_dnn_vfl_{subset_size}sa_{num_rounds}eps.npz",
         predictions=prediction_history["predictions"],
         prediction_probs=prediction_history["prediction_probs"],
         real_values=prediction_history["real_values"],
@@ -144,7 +148,7 @@ def main(grid: Grid, context: Context) -> None:
     )
 
     test_metrics_single = save_test_metrics_single(num_rounds, f"dnn_vfl_{subset_size}sa", "server_model", 
-        [0, 1, 2, 3, 4, 5, 6, 7], subset_size)
+        [0, 1, 2, 3, 4, 5, 6, 7], subset_size, mode=-1)
     
 
 def train(grid, context, num_rounds, lr, embedding_dim, num_clients,
@@ -213,10 +217,25 @@ def train(grid, context, num_rounds, lr, embedding_dim, num_clients,
 
             node_pos_map: dict[int, tuple[int, int]] = {}
 
+            # --- DEBUG: Check client embeddings vs server labels ---
+            #DEBUG_NUM_SAMPLES = min(5, effective_batch_size)  # first few samples
+
             for i, reply in enumerate(replies):
                 node_id = reply.metadata.src_node_id
 
                 emb = reply.content["arrays"]["activations"].numpy()
+
+                print(f"[Client {i}] Embedding mean: {emb.mean():.6f}, std: {emb.std():.6f}, min: {emb.min():.6f}, max: {emb.max():.6f}")
+
+                """
+                print(f"\n--- Client {node_id} Embedding Debug ---")
+                print(f"Embedding shape: {emb.shape}")
+
+                for sample_idx in range(DEBUG_NUM_SAMPLES):
+                    emb_vec = emb[:, sample_idx]
+                    server_label = y[:, sample_idx]  # shape: (output_size,)
+                    print(f"Sample {sample_idx}: Embedding (first 5 values) {emb_vec[:5]} | Server label: {server_label.flatten()}")
+                """
 
                 start = i * embedding_dim
                 end = start + embedding_dim
@@ -441,7 +460,7 @@ def global_evaluate(server_round: int, arrays: ArrayRecord) -> MetricRecord:
     })
 
 def save_test_metrics_single(num_epochs, 
-    model_name, model_directory, TARGET_LIST, subset_size, confusion_matrix_fig_size=(10, 8)
+    model_name, model_directory, TARGET_LIST, subset_size, confusion_matrix_fig_size=(10, 8), mode = -1
 ):
     """
     Uses testing predictions stored in prediction_history (NumPy arrays) to build
@@ -462,103 +481,202 @@ def save_test_metrics_single(num_epochs,
         test_metrics (defaultdict): Dictionary of aggregated metrics.
     """
 
-    if num_epochs > 0:
-        confusion_matrix_file_name = f"cm_{model_name}_{num_epochs}eps"
+    if mode == -1:
+        pred_prefix = "prediction"
+        metric_prefix = "test"
     else:
-        confusion_matrix_file_name = f"cm_{model_name}"
+        pred_prefix = "training"
+        metric_prefix = "train"
 
     os.makedirs(model_directory, exist_ok=True)
 
-    prediction_history = np.load(f"./server_model/prediction_history_dnn_vfl_{subset_size}sa.npz", allow_pickle=True)
+    prediction_history = np.load(f"./server_model/{pred_prefix}_history_dnn_vfl_{subset_size}sa.npz", allow_pickle=True)
 
-    y_pred = prediction_history["predictions"]
-    y_proba = prediction_history["prediction_probs"]
-    real_values = prediction_history["real_values"]
-    inference_time = prediction_history["avg_inference_time_ms"][0]
+    if mode == -1:
+        if num_epochs > 0:
+            confusion_matrix_file_name = f"{metric_prefix}_cm_{model_name}_{num_epochs}eps"
+        else:
+            confusion_matrix_file_name = f"{metric_prefix}_cm_{model_name}"
+        y_pred = prediction_history["predictions"]
+        y_proba = prediction_history["prediction_probs"]
+        real_values = prediction_history["real_values"]
+        inference_time = prediction_history["avg_inference_time_ms"][0]
 
-    # Flatten if necessary (shape: num_samples,)
-    if y_pred.ndim > 1 and y_pred.shape[0] == 1:
-        y_pred = y_pred.flatten()
-    if real_values.ndim > 1 and real_values.shape[0] == 1:
-        real_values = real_values.flatten()
-    
-    # Confusion matrix
-    print("\n--- DEBUG LABEL INSPECTION ---")
+        # Flatten if necessary (shape: num_samples,)
+        if y_pred.ndim > 1 and y_pred.shape[0] == 1:
+            y_pred = y_pred.flatten()
+        if real_values.ndim > 1 and real_values.shape[0] == 1:
+            real_values = real_values.flatten()
+        
+        # Confusion matrix
+        print("\n--- DEBUG LABEL INSPECTION ---")
 
-    print("real_values shape:", real_values.shape)
-    print("y_pred shape:", y_pred.shape)
+        print("real_values shape:", real_values.shape)
+        print("y_pred shape:", y_pred.shape)
 
-    print("Unique real_values:", np.unique(real_values))
-    print("Unique y_pred:", np.unique(y_pred))
+        print("Unique real_values:", np.unique(real_values))
+        print("Unique y_pred:", np.unique(y_pred))
 
-    present_labels = sorted(set(real_values) | set(y_pred))
-    print("present_labels:", present_labels)
+        present_labels = sorted(set(real_values) | set(y_pred))
+        print("present_labels:", present_labels)
 
-    valid_labels = [label for label in TARGET_LIST if label in present_labels]
-    print("valid_labels:", valid_labels)
+        valid_labels = [label for label in TARGET_LIST if label in present_labels]
+        print("valid_labels:", valid_labels)
 
-    print("--- END DEBUG ---\n")
+        print("--- END DEBUG ---\n")
 
-    cm = confusion_matrix(real_values, y_pred, labels=valid_labels)
+        cm = confusion_matrix(real_values, y_pred, labels=valid_labels)
 
-    def format_k(x):
-        return f"{x/1000:.1f}k" if x >= 1000 else str(x)
+        def format_k(x):
+            return f"{x/1000:.1f}k" if x >= 1000 else str(x)
 
-    # Create formatted annotations
-    annot = np.array([[format_k(val) for val in row] for row in cm])
+        # Create formatted annotations
+        annot = np.array([[format_k(val) for val in row] for row in cm])
 
-    df_cm = pd.DataFrame(cm, index=valid_labels, columns=valid_labels)
-    os.makedirs(os.path.dirname("./figures/"), exist_ok=True)
-    show_confusion_matrix(df_cm, annot, confusion_matrix_fig_size, confusion_matrix_file_name, num_epochs)
+        df_cm = pd.DataFrame(cm, index=valid_labels, columns=valid_labels)
+        os.makedirs(os.path.dirname("./figures/"), exist_ok=True)
+        show_confusion_matrix(df_cm, annot, confusion_matrix_fig_size, confusion_matrix_file_name, num_epochs, mode=mode)
 
-    # Compute metrics
-    test_metrics = defaultdict(float)
+        # Compute metrics
+        test_metrics = defaultdict(float)
 
-    # Micro accuracy
-    test_metrics["micro_acc"] = accuracy_score(real_values, y_pred)
+        # Micro accuracy
+        test_metrics["micro_acc"] = accuracy_score(real_values, y_pred)
 
-    # Binarize for ROC-AUC
-    n_classes = len(np.unique(real_values))
-    y_true_bin = label_binarize(real_values, classes=np.arange(n_classes))
+        # Binarize for ROC-AUC
+        n_classes = len(np.unique(real_values))
+        y_true_bin = label_binarize(real_values, classes=np.arange(n_classes))
 
-    # Micro ROC-AUC
-    try:
-        test_metrics["micro_roc_auc"] = roc_auc_score(
-            y_true_bin, y_proba.T, average="micro", multi_class="ovr"
+        # Micro ROC-AUC
+        try:
+            test_metrics["micro_roc_auc"] = roc_auc_score(
+                y_true_bin, y_proba.T, average="micro", multi_class="ovr"
+            )
+        except ValueError:
+            test_metrics["micro_roc_auc"] = float("nan")
+
+        # Macro metrics
+        test_metrics["macro_prec"] = precision_score(real_values, y_pred, average="macro", zero_division=0)
+        test_metrics["macro_rec"] = recall_score(real_values, y_pred, average="macro", zero_division=0)
+        test_metrics["macro_f1"] = f1_score(real_values, y_pred, average="macro")
+
+        try:
+            test_metrics["macro_roc_auc"] = roc_auc_score(
+                y_true_bin, y_proba.T, average="macro", multi_class="ovr"
+            )
+        except ValueError:
+            test_metrics["macro_roc_auc"] = float("nan")
+
+        # Inference time
+        test_metrics["inference_time"] = inference_time
+
+        # Save metrics
+        metrics_path = os.path.join(model_directory, f"{metric_prefix}_metrics_{model_name}.npz")
+        np.savez(metrics_path, **test_metrics)
+
+        print(f"[Info] Saved {metric_prefix} metrics to {metrics_path}")
+
+        plot_test_metrics_table(
+            test_metrics,
+            model_name=model_name,
+            num_epochs=num_epochs,
+            mode=mode
         )
-    except ValueError:
-        test_metrics["micro_roc_auc"] = float("nan")
+    else:
+        for rnd_idx, y_pred in enumerate(prediction_history["predictions"]):
+            if num_epochs > 0:
+                confusion_matrix_file_name = f"{metric_prefix}_cm_{model_name}_{rnd_idx+1}eps"
+            else:
+                confusion_matrix_file_name = f"{metric_prefix}_cm_{model_name}"
+            y_proba = prediction_history["prediction_probs"][rnd_idx]
+            real_values = prediction_history["real_values"][rnd_idx]
+            inference_time = prediction_history["avg_inference_time_ms"][0]
 
-    # Macro metrics
-    test_metrics["macro_prec"] = precision_score(real_values, y_pred, average="macro", zero_division=0)
-    test_metrics["macro_rec"] = recall_score(real_values, y_pred, average="macro", zero_division=0)
-    test_metrics["macro_f1"] = f1_score(real_values, y_pred, average="macro")
+            # Flatten if necessary (shape: num_samples,)
+            if y_pred.ndim > 1 and y_pred.shape[0] == 1:
+                y_pred = y_pred.flatten()
+            if real_values.ndim > 1 and real_values.shape[0] == 1:
+                real_values = real_values.flatten()
+            
+            # Confusion matrix
+            print("\n--- DEBUG LABEL INSPECTION ---")
 
-    try:
-        test_metrics["macro_roc_auc"] = roc_auc_score(
-            y_true_bin, y_proba.T, average="macro", multi_class="ovr"
-        )
-    except ValueError:
-        test_metrics["macro_roc_auc"] = float("nan")
+            print("real_values shape:", real_values.shape)
+            print("y_pred shape:", y_pred.shape)
 
-    # Inference time
-    test_metrics["inference_time"] = inference_time
+            print("Unique real_values:", np.unique(real_values))
+            print("Unique y_pred:", np.unique(y_pred))
 
-    # Save metrics
-    metrics_path = os.path.join(model_directory, f"test_metrics_{model_name}.npz")
-    np.savez(metrics_path, **test_metrics)
+            present_labels = sorted(set(real_values) | set(y_pred))
+            print("present_labels:", present_labels)
 
-    print(f"[Info] Saved test metrics to {metrics_path}")
+            valid_labels = [label for label in TARGET_LIST if label in present_labels]
+            print("valid_labels:", valid_labels)
 
-    plot_test_metrics_table(
-        test_metrics,
-        model_name=model_name,
-        num_epochs=num_epochs,
-    )
+            print("--- END DEBUG ---\n")
+
+            cm = confusion_matrix(real_values, y_pred, labels=valid_labels)
+
+            def format_k(x):
+                return f"{x/1000:.1f}k" if x >= 1000 else str(x)
+
+            # Create formatted annotations
+            annot = np.array([[format_k(val) for val in row] for row in cm])
+
+            df_cm = pd.DataFrame(cm, index=valid_labels, columns=valid_labels)
+            os.makedirs(os.path.dirname("./figures/"), exist_ok=True)
+            show_confusion_matrix(df_cm, annot, confusion_matrix_fig_size, confusion_matrix_file_name, num_epochs, mode=mode)
+
+            # Compute metrics
+            test_metrics = defaultdict(float)
+
+            # Micro accuracy
+            test_metrics["micro_acc"] = accuracy_score(real_values, y_pred)
+
+            # Binarize for ROC-AUC
+            n_classes = len(np.unique(real_values))
+            y_true_bin = label_binarize(real_values, classes=np.arange(n_classes))
+
+            # Micro ROC-AUC
+            try:
+                test_metrics["micro_roc_auc"] = roc_auc_score(
+                    y_true_bin, y_proba.T, average="micro", multi_class="ovr"
+                )
+            except ValueError:
+                test_metrics["micro_roc_auc"] = float("nan")
+
+            # Macro metrics
+            test_metrics["macro_prec"] = precision_score(real_values, y_pred, average="macro", zero_division=0)
+            test_metrics["macro_rec"] = recall_score(real_values, y_pred, average="macro", zero_division=0)
+            test_metrics["macro_f1"] = f1_score(real_values, y_pred, average="macro")
+
+            try:
+                test_metrics["macro_roc_auc"] = roc_auc_score(
+                    y_true_bin, y_proba.T, average="macro", multi_class="ovr"
+                )
+            except ValueError:
+                test_metrics["macro_roc_auc"] = float("nan")
+
+            # Inference time
+            test_metrics["inference_time"] = inference_time
+
+            # Save metrics
+            metrics_path = os.path.join(model_directory, f"{metric_prefix}_metrics_{model_name}_{rnd_idx+1}eps.npz")
+            np.savez(metrics_path, **test_metrics)
+
+            print(f"[Info] Saved {metric_prefix} metrics to {metrics_path}")
+
+            plot_test_metrics_table(
+                test_metrics,
+                model_name=model_name,
+                num_epochs=rnd_idx+1,
+                mode=mode
+            )
+
 
     return test_metrics
 
-def show_confusion_matrix(confusion_matrix, annot, confusion_matrix_fig_size, figure_version, num_epochs):
+def show_confusion_matrix(confusion_matrix, annot, confusion_matrix_fig_size, figure_version, num_epochs, mode=-1):
     plt.figure(figsize=confusion_matrix_fig_size)
     sns.heatmap(confusion_matrix, annot=annot, cmap='Blues', fmt='')
     plt.xticks(rotation=90)
@@ -567,7 +685,7 @@ def show_confusion_matrix(confusion_matrix, annot, confusion_matrix_fig_size, fi
     plt.savefig(f'./figures/{figure_version}.png',bbox_inches="tight",dpi=300)
     plt.clf()
 
-def plot_test_metrics_table(test_metrics, model_name, num_epochs):
+def plot_test_metrics_table(test_metrics, model_name, num_epochs, mode=-1):
     """
     Plots and saves a table of test metrics as a figure.
 
@@ -594,6 +712,11 @@ def plot_test_metrics_table(test_metrics, model_name, num_epochs):
         # Add more mappings as needed
     }
 
+    if mode == -1:
+        metric_prefix = "test"
+    else:
+        metric_prefix = "train"
+
     # Convert metrics to a list of [metric_name, value] rows
     data = []
     for key, value in test_metrics.items():
@@ -616,6 +739,6 @@ def plot_test_metrics_table(test_metrics, model_name, num_epochs):
     table.set_fontsize(12)
     table.scale(1, 1.5)
 
-    output_path = f"./figures/test_scores_{model_name}_{num_epochs}eps.png"
+    output_path = f"./figures/{metric_prefix}_scores_{model_name}_{num_epochs}eps.png"
     plt.savefig(output_path, dpi=300, bbox_inches='tight')
     plt.clf()
