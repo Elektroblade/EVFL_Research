@@ -188,10 +188,13 @@ class ServerModel(nn.Module):
         self.num_classes = num_classes
         self.hidden1 = nn.Linear(input_size, 128)
         self.hidden2 = nn.Linear(128, 64)   # extra hidden
-        self.fc = nn.Linear(64, 1)
         self.bn1 = nn.BatchNorm1d(128)
         self.bn2 = nn.BatchNorm1d(64)
-        self.sigmoid = nn.Sigmoid()
+        if self.num_classes <= 2:
+            self.fc = nn.Linear(64, 1)
+            self.sigmoid = nn.Sigmoid()
+        else:
+            self.fc = nn.Linear(64, num_classes)  # multiclass logits
 
     def forward(self, x):
         if (self.num_classes <= 2):
