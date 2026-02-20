@@ -104,6 +104,7 @@ def main(grid: Grid, context: Context) -> None:
     server, training_history = train(grid, context, num_rounds, lr, embedding_dim, num_clients,
           server, trainloader, total_number_of_samples, node_ids, global_batch_size)
     
+    os.makedirs(os.path.dirname("./server_model/"), exist_ok=True)
     # Save to disk
     np.savez(
         f"./server_model/training_history_dnn_vfl_{subset_size}sa_{num_rounds}eps.npz",
@@ -131,7 +132,6 @@ def main(grid: Grid, context: Context) -> None:
         "task_type": server.task_type,
     }
 
-    os.makedirs(os.path.dirname("./server_model/"), exist_ok=True)
     np.save(f"./server_model/dnn_vfl_{subset_size}sa_{num_rounds}eps.npy", server_state)
     log(INFO, "Model saved to server_model.npy")
 
