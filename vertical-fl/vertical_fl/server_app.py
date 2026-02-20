@@ -82,7 +82,7 @@ def main(grid: Grid, context: Context) -> None:
 
     # Save final server model
     log(INFO, "")
-    log(INFO, "Saving final ServerMLP model...")
+    log(INFO, "Saving final ServerDNN model...")
 
     out_feature_dim_clientapp: int = context.run_config["out-feature-dim-clientapp"]
     head.client_embedding_dims = {
@@ -545,7 +545,7 @@ def save_test_metrics_single(num_epochs,
         # Micro ROC-AUC
         try:
             test_metrics["micro_roc_auc"] = roc_auc_score(
-                y_true_bin, probs.T, average="micro", multi_class="ovr"
+                y_true_bin, probs, average="micro", multi_class="ovr"
             )
         except ValueError:
             test_metrics["micro_roc_auc"] = float("nan")
@@ -557,7 +557,7 @@ def save_test_metrics_single(num_epochs,
 
         try:
             test_metrics["macro_roc_auc"] = roc_auc_score(
-                y_true_bin, probs.T, average="macro", multi_class="ovr"
+                y_true_bin, probs, average="macro", multi_class="ovr"
             )
         except ValueError:
             test_metrics["macro_roc_auc"] = float("nan")
