@@ -14,10 +14,10 @@ from datasets import load_from_disk
 RAY_ACCEL_ENV_VAR_OVERRIDE_ON_ZERO=0
 
 INPUT_SIZE = 79
-OUTPUT_SIZE = 8
+OUTPUT_SIZE = 1 # 8
 HIDDEN_LAYERS = 2
 NEURONS_PER_LAYER = 32
-TASK_TYPE = "multiclass"
+TASK_TYPE = "binary" #"multiclass"
 SEED = 42
 BATCH_SIZE = 32
 DROP_COLS = [
@@ -26,8 +26,8 @@ DROP_COLS = [
     "Dst IP",
     "Timestamp"
 ]
-DATASET_DIR = "datasets/insdn_hf_dataset"
-PARTITION_SIZES = [26, 26, 25]
+DATASET_DIR = "datasets/titanic" # insdn_hf_dataset
+PARTITION_SIZES = [3,3,2] # [26, 26, 25]
 
 class DNN: 
     def sigmoid(z):

@@ -1,0 +1,47 @@
+{
+  "citation": "",
+  "description": "",
+  "features": {
+    "pclass": {
+      "dtype": "float64",
+      "_type": "Value"
+    },
+    "age": {
+      "dtype": "float64",
+      "_type": "Value"
+    },
+    "sibsp": {
+      "dtype": "float64",
+      "_type": "Value"
+    },
+    "parch": {
+      "dtype": "float64",
+      "_type": "Value"
+    },
+    "fare": {
+      "dtype": "float64",
+      "_type": "Value"
+    },
+    "sex_male": {
+      "dtype": "bool",
+      "_type": "Value"
+    },
+    "embarked_Q": {
+      "dtype": "bool",
+      "_type": "Value"
+    },
+    "embarked_S": {
+      "dtype": "bool",
+      "_type": "Value"
+    },
+    "target": {
+      "names": [
+        "0",
+        "1"
+      ],
+      "_type": "ClassLabel"
+    }
+  },
+  "homepage": "",
+  "license": ""
+}
