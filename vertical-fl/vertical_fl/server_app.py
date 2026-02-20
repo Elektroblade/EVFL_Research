@@ -1,7 +1,7 @@
 from collections import defaultdict
 from logging import INFO
 import numpy as np
-
+import pandas as pd
 from sklearn.calibration import label_binarize
 import torch
 from datasets import load_dataset
@@ -25,6 +25,7 @@ import matplotlib.cm as cm
 import seaborn as sns
 import os
 import gc
+import torch.nn as nn
 from sklearn.metrics import (
     confusion_matrix,
     classification_report,
@@ -83,8 +84,9 @@ def main(grid: Grid, context: Context) -> None:
     log(INFO, "")
     log(INFO, "Saving final ServerMLP model...")
 
+    out_feature_dim_clientapp: int = context.run_config["out-feature-dim-clientapp"]
     head.client_embedding_dims = {
-        f"client_{i}": 32 for i in range(len(PARTITION_SIZES))
+        f"client_{i}": out_feature_dim_clientapp for i in range(len(PARTITION_SIZES))
     }
 
     torch.save(head.state_dict(), f"./server_model/{model_name}_state.pt")
@@ -92,9 +94,13 @@ def main(grid: Grid, context: Context) -> None:
         "input_size": head.input_size,
         "num_classes": head.num_classes,
         "client_embedding_dims": head.client_embedding_dims,
-        "task_type": head.task_type,
+        "task_type": TASK_TYPE,
         "dropout_rate": getattr(head, "dropout_rate", None),
-        "hidden_layers": [layer.out_features for layer in head.hidden_layers]  # if multi-layer
+        "hidden_layers": [
+            layer.out_features
+            for name, layer in head.named_modules()
+            if isinstance(layer, nn.Linear) and name.startswith("hidden")
+        ]
     }
     np.save(f"./server_model/{model_name}_metadata.npy", metadata)
 

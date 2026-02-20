@@ -186,6 +186,7 @@ class ServerModel(nn.Module):
     def __init__(self, input_size, num_classes):
         super(ServerModel, self).__init__()
         self.num_classes = num_classes
+        self.input_size = input_size
         self.hidden1 = nn.Linear(input_size, 128)
         self.hidden2 = nn.Linear(128, 64)   # extra hidden
         self.bn1 = nn.BatchNorm1d(128)
