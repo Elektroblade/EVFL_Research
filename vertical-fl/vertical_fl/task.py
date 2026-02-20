@@ -46,7 +46,7 @@ FEATURE_COLUMNS = ['Protocol', 'Flow Duration', 'Tot Fwd Pkts', 'Tot Bwd Pkts', 
                    'Active Std', 'Active Max', 'Active Min', 'Idle Mean', 'Idle Std', 'Idle Max', 'Idle Min']
 PARTITION_SIZES = [26,26,25]
 DATASET_NAME = "insdn"
-MODEL_FAMILY = "MLP"
+MODEL_FAMILY = "DNN"
 
 """
 FEATURE_COLUMNS = [
@@ -171,41 +171,43 @@ class ClientModel(nn.Module):
     def __init__(self, input_size, out_feat_dim):
         super().__init__()
         self.fc1 = nn.Linear(input_size, 128)
-        self.fc2 = nn.Linear(128, out_feat_dim)
+        self.fc2 = nn.Linear(128, 64)          # extra hidden layer
+        self.dropout = nn.Dropout(0.1)
+        self.fc3 = nn.Linear(64, out_feat_dim) # output layer
 
     def forward(self, x):
-        x = self.fc1(x)
-        x = nn.functional.relu(x)
-        return self.fc2(x)
+        x = nn.functional.relu(self.fc1(x))
+        x = nn.functional.relu(self.fc2(x))
+        x = self.dropout(x)
+        return self.fc3(x)
 
 
 class ServerModel(nn.Module):
     def __init__(self, input_size, num_classes):
         super(ServerModel, self).__init__()
         self.num_classes = num_classes
-        if (num_classes <= 2):
-            self.hidden = nn.Linear(input_size, 96)
-            self.fc = nn.Linear(96, 1)
-            self.bn = nn.BatchNorm1d(96)
-            self.sigmoid = nn.Sigmoid()
-        else:
-            self.hidden = nn.Linear(input_size, 96)
-            self.bn = nn.BatchNorm1d(96)
-            self.fc = nn.Linear(96, num_classes)
+        self.hidden1 = nn.Linear(input_size, 128)
+        self.hidden2 = nn.Linear(128, 64)   # extra hidden
+        self.fc = nn.Linear(64, 1)
+        self.bn1 = nn.BatchNorm1d(128)
+        self.bn2 = nn.BatchNorm1d(64)
+        self.sigmoid = nn.Sigmoid()
 
     def forward(self, x):
         if (self.num_classes <= 2):
-            x = self.hidden(x)
-            x = nn.functional.relu(x)
-            x = self.bn(x)
+            x = nn.functional.relu(self.hidden1(x))
+            x = self.bn1(x)
+            x = nn.functional.relu(self.hidden2(x))
+            x = self.bn2(x)
             x = self.fc(x)
             return self.sigmoid(x)
         else:
-            x = self.hidden(x)
-            x = nn.functional.relu(x)
-            x = self.bn(x)
-            x = self.fc(x)  # NO sigmoid
-            return x  # raw logits
+            x = nn.functional.relu(self.hidden1(x))
+            x = self.bn1(x)
+            x = nn.functional.relu(self.hidden2(x))
+            x = self.bn2(x)
+            x = self.fc(x)
+            return x
 
 def evaluate_head_model(
     head: ServerModel, embeddings: torch.Tensor, labels: torch.Tensor

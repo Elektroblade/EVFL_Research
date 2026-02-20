@@ -87,14 +87,16 @@ def main(grid: Grid, context: Context) -> None:
         f"client_{i}": 32 for i in range(len(PARTITION_SIZES))
     }
 
-    server_state = {
-        "weights": head.weights,
-        "biases": head.biases,
+    torch.save(head.state_dict(), f"./server_model/{model_name}_state.pt")
+    metadata = {
+        "input_size": head.input_size,
+        "num_classes": head.num_classes,
         "client_embedding_dims": head.client_embedding_dims,
         "task_type": head.task_type,
+        "dropout_rate": getattr(head, "dropout_rate", None),
+        "hidden_layers": [layer.out_features for layer in head.hidden_layers]  # if multi-layer
     }
-
-    np.save(f"./server_model/{model_name}.npy", server_state)
+    np.save(f"./server_model/{model_name}_metadata.npy", metadata)
 
     testing_history = test(test_dataset, num_rounds, grid, in_feature_dim_clientapp, out_feature_dim_clientapp, head)
 
