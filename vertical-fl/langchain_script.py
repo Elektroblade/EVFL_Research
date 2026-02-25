@@ -38,8 +38,8 @@ def main():
 
     chat = ChatHuggingFace(pipeline=pipe)
 
-    response = chat("Explains LLMs in one sentence.")
-    print(response)
+    #response = chat("Explains LLMs in one sentence.")
+    #print(response)
 
     
     messages = [
