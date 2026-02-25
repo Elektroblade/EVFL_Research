@@ -2,7 +2,9 @@ from dotenv import load_dotenv, find_dotenv
 import torch
 from transformers import AutoTokenizer, AutoModelForCausalLM, pipeline, BitsAndBytesConfig
 from langchain_community.llms import HuggingFacePipeline
+from langchain_community.chat_models import ChatHuggingFace
 load_dotenv(find_dotenv())
+from langchain_core.messages import SystemMessage, HumanMessage
 
 
 def main():
@@ -34,9 +36,18 @@ def main():
         do_sample=False,
     )
 
-    llm = HuggingFacePipeline(pipeline=pipe)
-    response = llm.invoke("Explains LLMs in one sentence.")
+    chat = ChatHuggingFace(pipeline=pipe)
+
+    response = chat("Explains LLMs in one sentence.")
     print(response)
+
+    
+    messages = [
+        SystemMessage(content="You are a helpful assistant."),
+        HumanMessage(content="Explain LLMs in one sentence.")
+    ]
+    chat(messages)
+
 
 if __name__ == "__main__":
     main()
