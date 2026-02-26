@@ -104,6 +104,18 @@ def main(grid: Grid, context: Context) -> None:
     }
     np.save(f"./server_model/{model_name}_metadata.npy", metadata)
 
+    metadata = np.load(
+        f"./server_model/{model_name}_metadata.npy",
+        allow_pickle=True
+    ).item()
+
+    print(metadata)
+
+    if TASK_TYPE == "binary":
+        head = ServerModel(input_size=metadata["input_size"])
+    else:  # multiclass
+        head = ServerModel(input_size=metadata["input_size"], num_classes=metadata["num_classes"])
+
     testing_history = test(test_dataset, num_rounds, grid, in_feature_dim_clientapp, out_feature_dim_clientapp, head)
 
     # Save to disk
