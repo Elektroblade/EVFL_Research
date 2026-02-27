@@ -11,6 +11,7 @@ from langchain_core.prompts import ChatPromptTemplate
 import numpy as np
 import pandas as pd
 from datasets import load_from_disk
+import shap
 
 from vertical_fl.task import (FEATURE_COLUMNS, 
     TARGET_COLUMN, DATASET_DIR, SEED, ServerModel, evaluate_head_model, TASK_TYPE, OUTPUT_SIZE, PARTITION_SIZES, DATASET_NAME, MODEL_FAMILY)
@@ -18,6 +19,17 @@ from vertical_fl.task import (FEATURE_COLUMNS,
 
 
 def main():
+    full_english_labels = [
+        "User-to-Root Privilege Escalation Attack",
+        "Brute Force Authentication Attack",
+        "Distributed Denial of Service Attack",
+        "Denial of Service Attack",
+        "Network Reconnaissance / Probing Attack",
+        "Normal Benign Network Traffic",
+        "Web Application Exploitation Attack",
+        "Botnet-Based Malware Activity"
+    ]
+
     subset_size = -1
     num_rounds = 40
     llm_text_gen = HuggingFaceEndpoint(
@@ -40,14 +52,14 @@ def main():
     prompt = ChatPromptTemplate(
         [
             ("system", "You are a network security expert with expertise in how different types of network threats can be identified and what mitigation steps are most critical for each."),
-            ("human", "Explain plausible reasons why the intrusion detection system identified a {concept} attack in a couple lines and give 3 recommended mitigation steps in a couple lines each.")
+            ("human", "Explain plausible reasons why the intrusion detection system identified a {concept} attack in a couple lines, based on that the SHAP values are {shap_val}, and give 3 recommended mitigation steps in a couple lines each.")
         ]
     )
 
     print(prompt)
     chain = prompt | chat
-    response = chain.invoke({"concept": "Distributed Denial of Service"})
-    print(response.content)
+    #response = chain.invoke({"concept": "Distributed Denial of Service"})
+    #print(response.content)
 
     model_name = f"{DATASET_NAME}_{MODEL_FAMILY}_vfl_{subset_size}sa_{num_rounds}eps"
 
@@ -63,18 +75,53 @@ def main():
     else:  # multiclass
         model = ServerModel(input_size=metadata["input_size"], num_classes=metadata["num_classes"])
 
-    dataset = load_from_disk(DATASET_DIR)
+    state_dict = torch.load(f"./server_model/{model_name}_state.pt")
+    model.load_state_dict(state_dict)
 
-    # Currently the entire dataset is in a pseudo "train" split
-    dataset = dataset["train"].train_test_split(
-        test_size=0.2,
-        seed=SEED,
-    )
+    emb_np = np.load(f"./server_model/testing_embeddings_{model_name}.npy", allow_pickle=True)
+    X_emb = torch.from_numpy(emb_np).float()
+    X_emb.requires_grad = True
 
-    if 0 < subset_size < len(dataset["train"]):
-        test_dataset = dataset["test"].select(range(subset_size))
-    else:
-        test_dataset = dataset["test"]
+    model.eval()
+
+    # Background sample
+    g = torch.Generator()
+    g.manual_seed(SEED)
+    num_background = 100
+    indices = torch.randperm(X_emb.shape[0], generator=g)[:num_background]
+    background = X_emb[indices]
+    explainer = shap.DeepExplainer(model, background)
+
+    userInput = input("Enter an index: ")
+
+    try:
+        userIndex = int(userInput)
+        print(f"You entered a valid integer: {userIndex}")
+    except ValueError:
+        print("Input is not an integer, continuing...")
+        userIndex = -1
+    while (userInput != "n" and userIndex != -1):
+        x_index = X_emb[userIndex:userIndex+1]
+        shap_values = explainer.shap_values(x_index, check_additivity=False)
+        userInput = input("Enter an index: ")
+
+        try:
+            userIndex = int(userInput)
+            print(f"You entered a valid integer: {userIndex}")
+        except ValueError:
+            print("Input is not an integer, continuing...")
+            userIndex = -1
+        
+        with torch.no_grad():
+            output = model(x_index)
+
+        probs = torch.softmax(output, dim=1)
+        pred_class_idx = torch.argmax(probs, dim=1).item()
+        full_english_label = full_english_labels[pred_class_idx]
+
+        response = chain.invoke({"concept": full_english_label},
+                                {"shap_val": str(shap_values)})
+        print(response.content)
 
 if __name__ == "__main__":
     main()
