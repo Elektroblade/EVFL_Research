@@ -19,6 +19,7 @@ from vertical_fl.task import (FEATURE_COLUMNS,
 
 def main():
     subset_size = -1
+    num_rounds = 40
     llm_text_gen = HuggingFaceEndpoint(
         repo_id="meta-llama/Llama-3.1-8B-Instruct",
         huggingfacehub_api_token=os.getenv("HUGGINGFACEHUB_API_TOKEN"),
@@ -48,8 +49,10 @@ def main():
     response = chain.invoke({"concept": "Distributed Denial of Service"})
     print(response.content)
 
+    model_name = f"{DATASET_NAME}_{MODEL_FAMILY}_vfl_{subset_size}sa_{num_rounds}eps"
+
     metadata = np.load(
-        "./server_model/my_model_metadata.npy",
+        f"./server_model/{model_name}_metadata.npy",
         allow_pickle=True
     ).item()
 

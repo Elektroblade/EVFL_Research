@@ -115,8 +115,10 @@ def main(grid: Grid, context: Context) -> None:
         head = ServerModel(input_size=metadata["input_size"])
     else:  # multiclass
         head = ServerModel(input_size=metadata["input_size"], num_classes=metadata["num_classes"])
-
-    testing_history = test(test_dataset, num_rounds, grid, in_feature_dim_clientapp, out_feature_dim_clientapp, head)
+    state_dict = torch.load(f"./server_model/{model_name}_state.pt")
+    head.load_state_dict(state_dict)
+        
+    testing_history, embeddings = test(test_dataset, num_rounds, grid, in_feature_dim_clientapp, out_feature_dim_clientapp, head)
 
     # Save to disk
     np.savez(
@@ -127,6 +129,8 @@ def main(grid: Grid, context: Context) -> None:
         real_values=testing_history["real_values"],
         avg_inference_time_ms=testing_history["avg_inference_time_ms"],
     )
+
+    np.save(f"./server_model/testing_embeddings_{model_name}.npy", embeddings.detach().cpu().numpy())
 
     test_metrics_single = save_test_metrics_single(num_rounds, model_name, "server_model", 
         [0, 1, 2, 3, 4, 5, 6, 7], subset_size, mode=-1)
@@ -385,7 +389,7 @@ def test(dataset, num_rounds, grid, in_feature_dim_clientapp, out_feature_dim_cl
     avg_per_sample_time_ms = total_inference_time_ms / processed_samples
     prediction_history["avg_inference_time_ms"] = np.array([avg_per_sample_time_ms])
 
-    return prediction_history
+    return prediction_history, embeddings
 
 
 def send_gradients_to_clients(

@@ -212,7 +212,7 @@ class ServerModel(nn.Module):
             x = self.bn2(x)
             x = self.fc(x)
             return x
-
+        
 def evaluate_head_model(
     head: ServerModel, embeddings: torch.Tensor, labels: torch.Tensor
 ) -> float:
