@@ -52,7 +52,7 @@ def main():
     prompt = ChatPromptTemplate(
         [
             ("system", "You are a network security expert with expertise in how different types of network threats can be identified and what mitigation steps are most critical for each."),
-            ("human", "Explain plausible reasons why the intrusion detection system identified a {concept} attack in a couple lines, based on that the SHAP values are {shap_val}, and give 3 recommended mitigation steps in a couple lines each.")
+            ("human", "Explain plausible reasons why the intrusion detection system identified a {concept} attack in a couple lines, and give 3 recommended mitigation steps in a couple lines each.")
         ]
     )
 
@@ -85,12 +85,12 @@ def main():
     model.eval()
 
     # Background sample
-    g = torch.Generator()
-    g.manual_seed(SEED)
-    num_background = 100
-    indices = torch.randperm(X_emb.shape[0], generator=g)[:num_background]
-    background = X_emb[indices]
-    explainer = shap.DeepExplainer(model, background)
+    #g = torch.Generator()
+    #g.manual_seed(SEED)
+    #num_background = 100
+    #indices = torch.randperm(X_emb.shape[0], generator=g)[:num_background]
+    #background = X_emb[indices]
+    #explainer = shap.DeepExplainer(model, background)
 
     userInput = input("Enter an index: ")
 
@@ -102,7 +102,18 @@ def main():
         userIndex = -1
     while (userInput != "n" and userIndex != -1):
         x_index = X_emb[userIndex:userIndex+1]
-        shap_values = explainer.shap_values(x_index, check_additivity=False)
+
+        with torch.no_grad():
+            output = model(x_index)
+
+        probs = torch.softmax(output, dim=1)
+        pred_class_idx = torch.argmax(probs, dim=1).item()
+        full_english_label = full_english_labels[pred_class_idx]
+
+        response = chain.invoke({"concept": full_english_label})
+        print(response.content)
+
+        #shap_values = explainer.shap_values(x_index, check_additivity=False)
         userInput = input("Enter an index: ")
 
         try:
@@ -111,17 +122,6 @@ def main():
         except ValueError:
             print("Input is not an integer, continuing...")
             userIndex = -1
-        
-        with torch.no_grad():
-            output = model(x_index)
-
-        probs = torch.softmax(output, dim=1)
-        pred_class_idx = torch.argmax(probs, dim=1).item()
-        full_english_label = full_english_labels[pred_class_idx]
-
-        response = chain.invoke({"concept": full_english_label},
-                                {"shap_val": str(shap_values)})
-        print(response.content)
 
 if __name__ == "__main__":
     main()
